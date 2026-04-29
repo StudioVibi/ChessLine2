@@ -1,0 +1,1038 @@
+GDD — Chess Line 2
+
+1. Visão Geral
+
+Título: Chess Line 2
+Engine: Determinística
+Implementação alvo: TS-React
+Modo alvo: 1v1 online
+Base herdada: Chess Line 1 / Chess Line Hotseat
+Escopo: regras de jogo, fluxo de rodadas, draft, progressão, picks, estados, UI/UX, assets e comportamento esperado em SPEC mode.
+Fora do escopo: menu principal, criação de sala, Vibi-network, AWS, matchmaking, backend e detalhes de infraestrutura.
+
+Chess Line 2 é uma evolução do Chess Line 1. O CL1 definiu a esteira de combate: tabuleiro linear, reis fixos, avanço automático, colisão, dano simultâneo, invocação, enjoo e resolução determinística por fases. O CL2 mantém essa base e adiciona uma camada acima do combate: Draft inicial, Rounds, Picks globais, progressão entre rounds, pontuação e relatório final.
+
+Regra de precedência: regras do CL2 sobrescrevem regras do CL1 quando houver conflito ou ambiguidade.
+
+
+2. Estrutura Macro
+
+Hierarquia:
+Rodadas -> Turnos -> Phases
+
+Core loop:
+Draft -> Round 1 -> Pick 1: Buff -> Round 2 -> Pick 2: Transform -> Round 3 -> Pick 3: Transform -> Final Round -> Relatório
+
+Round: trecho completo de combate usando a esteira herdada do CL1.
+Pick: fase entre rounds em que os jogadores escolhem modificadores globais permanentes.
+Relatório: tela final da partida/run.
+
+
+3. Board e Slots
+
+O CL2 herda o tabuleiro linear de 10 slots do CL1:
+
+[White King][White Invoke][White Special Invoke][ ][ ][ ][ ][Black Special Invoke][Black Invoke][Black King]
+
+Índices:
+0 = White King
+1 = White Invoke
+2 = White Special Invoke
+3 = lane
+4 = lane
+5 = lane
+6 = lane
+7 = Black Special Invoke
+8 = Black Invoke
+9 = Black King
+
+Natureza dos slots:
+Slots 0 e 9: ocupados exclusivamente pelos reis.
+Slots 1 e 8: slots normais de invocação.
+Slots 2 e 7: slots especiais de invocação.
+Slots 3, 4, 5 e 6: pista central.
+
+Direção:
+White avança para a direita.
+Black avança para a esquerda.
+Reis não se movem.
+
+
+4. Territórios / Slots Adversários
+
+O CL2 adiciona o conceito de território.
+
+O board é dividido em territórios de 4 slots para cada rei:
+- Os 4 slots mais próximos do White King pertencem ao território White.
+- Os 4 slots mais próximos do Black King pertencem ao território Black.
+
+Esse campo não altera por padrão:
+- movimento
+- colisão
+- confronto
+- invocação
+- bloqueio
+
+Ele serve para efeitos específicos, como:
+- Cavalos causam 2x mais dano em peças em território adversário.
+
+Exemplo conceitual:
+Se o Knight White atacar uma peça localizada nos 4 slots mais próximos do Black King, essa peça está em território adversário para White.
+
+
+5. Peças, Stats e Peso
+
+Stats base:
+Pawn   = 1 dano / 1 vida
+Knight = 3 dano / 3 vida
+Bishop = 3 dano / 3 vida
+Tower  = 5 dano / 5 vida
+Queen  = 9 dano / 9 vida
+King   = 4 dano / 4 vida
+
+Peso de draft:
+Pawn   = 1
+Bishop = 3
+Knight = 3
+Tower  = 5
+Queen  = 9
+King   = 0
+
+O peso das peças comuns é igual à vida inicial.
+O King é incluso automaticamente e não é opção de escolha no Draft.
+
+
+6. Representação Visual Textual para SPEC
+
+Mesmo usando assets, o GDD deve manter exemplos textuais para clareza de SPEC.
+
+Formato:
+[<InicialDaPeça><Cor><Vida>]
+
+Convenções:
+P = Pawn
+K = Knight
+B = Bishop
+T = Tower
+Q = Queen
+W = White
+B = Black
+
+Exemplos:
+[PW1] = Pawn White com 1 vida
+[KW3] = Knight White com 3 vida
+[BB3] = Bishop Black com 3 vida
+[TB5] = Tower Black com 5 vida
+[QW9] = Queen White com 9 vida
+
+Reis:
+[WK4] = White King com 4 vida
+[BK4] = Black King com 4 vida
+
+
+7. Draft
+
+O Draft define o estoque inicial do jogador.
+
+Regra:
+- O jogador escolhe quantidade livre de peças até peso total 20.
+- O King já é incluso automaticamente.
+- O King não entra como opção de escolha.
+- O King pesa 0.
+
+Exemplo válido:
+King automático = 0
+Queen x1 = 9
+Tower x1 = 5
+Bishop x2 = 6
+Peso total = 20
+
+Exemplo válido:
+King automático = 0
+Pawn x8 = 8
+Knight x2 = 6
+Bishop x2 = 6
+Peso total = 20
+
+Exemplo inválido:
+Queen x2 = 18
+Tower x1 = 5
+Peso total = 23
+Draft inválido.
+
+O Draft define exatamente o estoque disponível dentro de cada Round.
+
+
+8. Estoque por Round
+
+O estoque usado durante um Round é o estoque definido no Draft.
+Quando uma peça é invocada com sucesso, ela é consumida do estoque daquele Round.
+
+Entre rounds:
+- board reseta
+- peças resetam
+- estoque do Draft é restaurado
+- vida das peças é restaurada
+- reis são restaurados
+- apenas efeitos globais permanecem
+
+Exemplo:
+Draft: Pawn x4, Knight x2, Queen x1
+Durante Round 1: jogador invoca Pawn x2 e Queen x1
+Fim do Round 1: board reseta
+Round 2: estoque volta para Pawn x4, Knight x2, Queen x1
+
+
+9. Fluxo Interno do Turno
+
+Dentro de cada Round, o CL2 herda a esteira de turno do CL1:
+
+1. White Move Phase
+2. White Collision / Damage Resolution
+3. Black Move Phase
+4. Black Collision / Damage Resolution
+5. Sickness Reduction Phase
+6. Summon Resolution Phase
+
+Resumo:
+White move primeiro.
+Resolve dano de colisões geradas pelo avanço White.
+Black move depois.
+Resolve dano de colisões geradas pelo avanço Black.
+Reduz enjoo das unidades vivas.
+Invocações comprometidas entram no fim do turno.
+
+Essa estrutura deve permanecer determinística.
+
+
+10. Movimento Base
+
+Cada peça comum elegível tenta avançar 1 slot na sua phase de movimento.
+
+White: +1
+Black: -1
+
+Uma peça só move se:
+- estiver viva
+- não for rei
+- não estiver em enjoo de invocação
+
+Reis não se movem.
+
+Efeitos globais podem alterar essa regra, como:
+- Queen avança até 5 slots.
+- Knight ignora colisão com Pawns.
+
+
+11. Prioridade de Movimento
+
+Dentro da phase de movimento de uma cor, as peças são resolvidas por prioridade.
+
+Regra herdada:
+A peça com maior número de movimentos já realizados resolve primeiro.
+
+Desempate recomendado:
+White: menor índice para maior índice.
+Black: maior índice para menor índice.
+
+Essa regra evita engarrafamento próprio e deve ser estritamente determinística.
+
+
+12. Bloqueio por Aliado
+
+Se o slot de destino estiver ocupado por peça aliada, a peça não move.
+
+Exemplo:
+[PW1][PW1][][][][][][][]
+
+Se o Pawn de trás tentar avançar para o slot ocupado pelo Pawn aliado, ele fica bloqueado.
+Essa regra pode ser alterada apenas por efeito global explícito.
+
+
+13. Confronto e Dano
+
+Confronto ocorre quando uma peça tenta entrar em um slot ocupado por peça inimiga, incluindo rei.
+
+No confronto:
+- atacante causa dano ao defensor
+- defensor causa dano ao atacante
+- os danos acontecem simultaneamente
+- mesmo uma peça que morra ainda causa dano naquele confronto
+
+Remoção:
+- peças com vida <= 0 são removidas ao fim da resolução de dano da phase atual
+- a remoção acontece antes da próxima phase
+
+Exemplo:
+[][][][TW5][KB3][][][]
+->
+[][][][TW2][][][][]
+
+Interpretação:
+Tower White causa 5 de dano.
+KB3 morre.
+Tower recebe 3 de dano simultâneo.
+Tower fica com 2.
+
+
+14. Confronto com Rei
+
+Se uma peça confronta o rei inimigo, o rei sofre dano normalmente e responde com dano simultâneo.
+
+Exemplo:
+[BK4][KW3][][][][][][][][]
+->
+[BK1][][][][][][][][][]
+
+Interpretação:
+Knight White causa 3 de dano ao Black King.
+Black King causa 4 de dano ao Knight.
+Knight morre.
+Black King fica com 1.
+
+No CL2, a Transform de Pawn contra King sobrescreve o dano do Pawn:
+Pawn causa 4x damage contra King.
+
+O efeito pode ser apresentado visualmente como instakill, mas tecnicamente deve ser implementado como multiplicador de dano.
+
+
+15. Invocação
+
+Cada jogador pode commitar uma peça para invocação.
+
+Slots possíveis:
+White normal: 1
+White special: 2
+Black normal: 8
+Black special: 7
+
+As invocações entram apenas na Summon Resolution Phase.
+
+Se o slot de destino estiver ocupado na hora da resolução, a invocação falha.
+A falha ocorre mesmo que o slot esteja ocupado por:
+- peça aliada
+- peça inimiga
+- peça que chegou após o commit
+
+Regra importante:
+Peça commitada não é consumida se a invocação falhar.
+
+
+16. Enjoo de Invocação
+
+Unidades invocadas entram com 1 turno de enjoo.
+
+Durante o enjoo, a unidade:
+- existe no tabuleiro
+- ocupa espaço
+- pode sofrer dano
+- pode ser alvo
+- não se move
+
+Exemplo:
+[][][][][][][][]
+-(phase)>
+[PW1][][][][][][][PB1]
+-(turn)>
+[][PW1][][][][][PB1][]
+
+
+17. Pontuação dos Rounds
+
+Cada Round gera pontuação:
+Vitória = 1 ponto
+Empate  = 0,5 ponto
+Derrota = 0 ponto
+
+O vencedor final é quem tiver maior pontuação acumulada ao fim da run.
+Pode haver empate final.
+
+Valores possíveis exibidos no placar:
+0 / 0,5 / 1 / 1,5 / 2 / 2,5 / 3
+
+
+18. Placar Durante os Turnos
+
+Durante os turnos, acima da esteira, deve ser exibido o placar dos jogadores.
+
+Posicionamento:
+Pontuação do jogador White à esquerda.
+Pontuação do jogador Black à direita.
+Ambas acima da esteira.
+
+Exemplo visual conceitual:
+White Score: 1,5                         Black Score: 1
+
+[WK4][ ][ ][ ][ ][ ][ ][ ][ ][BK4]
+
+O placar atualiza ao fim de cada Round, após a contabilização de vitória, empate ou derrota.
+O placar não deve ser recalculado durante a phase de movimento; ele muda apenas após a resolução final do Round.
+
+
+19. Encerramento de Round
+
+No CL1, matar o rei encerrava a partida.
+No CL2, matar o rei encerra o Round atual.
+
+Quando um rei morre:
+- o Round termina imediatamente na phase em que o rei morreu
+- o vencedor do Round é contabilizado
+- as próximas phases daquele turno não são executadas
+- o jogo entra no fluxo entre rounds
+
+Empate de Round ocorre quando:
+- não existe nenhuma peça viva no tabuleiro além dos reis
+- e todos os estoques disponíveis para invocação do Round foram usados
+
+Se o Round terminar empatado, ambos recebem 0,5 ponto.
+
+
+20. Fluxo Entre Rounds
+
+Entre Rounds existem phases próprias:
+
+1. Contabilizar vencedor/empate do Round anterior
+2. Exibir resultado
+3. Exibir Picks respectivos
+4. Coletar Input
+5. Aplicar modificação global
+6. Exibir Asset do próximo round
+7. Reset das peças e board
+
+Apenas efeitos globais permanecem entre rounds.
+
+
+21. Picks
+
+Picks são escolhas de modificações globais feitas entre rounds.
+
+Existem 3 momentos de Pick:
+Pick 1: Buff
+Pick 2: Transform
+Pick 3: Transform
+
+Picks são simultâneos entre os dois jogadores.
+
+Regra:
+- Qualquer jogador pode escolher primeiro.
+- Os dois jogadores escolhem dentro do mesmo Pick.
+- Não é possível escolher o mesmo Buff duas vezes.
+- Não é possível escolher a mesma Transform duas vezes.
+
+Se um jogador escolher uma opção, a mesma opção fica indisponível para o outro jogador naquele Pick.
+As duas escolhas entram como efeitos globais permanentes.
+
+
+22. Efeitos Globais
+
+Buffs e Transforms são:
+- globais
+- simétricos
+- permanentes
+- aplicados a aliados e inimigos
+- aplicados a peças atuais e futuras
+- ativos até o fim da run
+
+Buffs afetam o grupo TODO.
+Transforms afetam por TIPO de peça.
+
+Exemplo:
+Se a Transform "Torres recebem dano reduzido em 1" for escolhida, todas as Towers do jogo recebem essa regra, independentemente do dono.
+
+Não existem, por enquanto:
+- efeitos temporários
+- efeitos enquanto vivo
+- efeitos que duram até a morte da peça
+- efeitos exclusivos de um jogador
+
+
+23. Ordem de Cálculo de Dano
+
+Modificadores aditivos entram antes dos multiplicadores.
+
+Exemplo:
+Dano base = 1
+Buff Multidão = +1
+Transform vs alvo específico = 2x
+
+Cálculo:
+(1 + 1) x 2 = 4
+
+Não usar:
+(1 x 2) + 1 = 3
+
+
+24. Pick 1: Buff
+
+Opções fixas da versão de teste:
+1. Multidão
+2. Crescimento
+3. Atropelamento
+
+Como existem 3 opções e 2 jogadores, duas opções serão escolhidas.
+
+24.1 Multidão
+Todas as peças ganham +1 de dano.
+Esse bônus é global, permanente e afeta peças futuras.
+
+24.2 Crescimento
+Quando uma peça se move, ela cura 1 de vida caso esteja machucada.
+Não existe sobrecura.
+
+Se a peça está com vida máxima, não cura.
+Se a peça está machucada, cura até no máximo sua vida máxima.
+
+Exemplo:
+[KW2] move.
+Knight tem vida máxima 3.
+Após mover: [KW3]
+
+Exemplo sem efeito:
+[KW3] move.
+Knight já está com vida máxima.
+Permanece: [KW3]
+
+24.3 Atropelamento
+Quando uma peça causa dano excedente ao destruir uma unidade, o dano excedente pode continuar em até 1 alvo adicional em sequência.
+Não pode atingir 2 ou mais alvos adicionais.
+
+Exemplo:
+[][][][QW9][TB5][TB5][][]
+-phase>
+[][][][][QW4][TB1][][]
+
+Interpretação:
+QW9 causa 9 de dano na primeira TB5.
+A primeira TB5 morre.
+Sobram 4 de dano excedente.
+O excedente atinge apenas 1 alvo adicional.
+A segunda TB5 recebe 4 de dano e fica com 1.
+O dano não continua para um terceiro alvo.
+
+
+25. Pick 2: Transform
+
+Opções fixas:
+1. Peões causam 2x mais dano em cavalos e bispos.
+2. Bispos causam dano a todas as unidades iguais em sequência.
+3. Torres recebem dano reduzido em 1.
+
+25.1 Pawn 2x vs Knight/Bishop
+Todos os Pawns causam 2x mais dano contra Knights e Bishops.
+Afeta Pawns de ambos os jogadores.
+Cálculo respeita aditivos antes de multiplicadores.
+
+Exemplo sem Buff:
+Pawn base = 1
+Alvo = Knight
+1 x 2 = 2
+
+Exemplo com Multidão:
+Pawn base = 1
+Multidão = +1
+Alvo = Bishop
+(1 + 1) x 2 = 4
+
+25.2 Bishop atinge sequência de iguais
+Bispos causam dano a todas as unidades iguais em sequência.
+A sequência é interrompida ao encontrar uma unidade de tipo diferente.
+
+Exemplo:
+[][][][BW3][PB1][PB1][KB3][PB1]
+-turn>
+[][][][][BW2][][KB3][PB1]
+
+Interpretação:
+Bishop atinge a sequência de PB1.
+Os Pawns adjacentes em sequência são afetados.
+KB3 interrompe a sequência.
+O PB1 depois do KB3 não é afetado.
+
+25.3 Tower reduz dano recebido
+Todas as Towers recebem dano reduzido em 1.
+A redução se aplica ao dano recebido.
+
+Exemplo:
+Tower recebe 3 de dano.
+Transform ativa reduz em 1.
+Tower recebe 2 de dano.
+
+O dano mínimo após redução não deve ser negativo.
+Se dano recebido = 1 e redução = 1, dano final = 0.
+
+
+26. Pick 3: Transform
+
+Opções fixas:
+1. Rainhas avançam até 5 slots no seu turno de movimento.
+2. Cavalos causam 2x mais dano em peças em território adversário.
+3. Cavalos ignoram colisão com peões.
+4. Peões causam 4x damage contra King.
+
+26.1 Queen avança até 5 slots
+Rainhas avançam até 5 slots no seu turno de movimento.
+
+Critérios de parada:
+1. Peça aliada na frente
+2. Confronto adversário
+3. Quantidade máxima de 5 slots
+
+Caso 1 — peça aliada na frente:
+[QW9][][][][KW3][][][]
+-turn>
+[][][][QW9][KW3][][]
+
+Leitura:
+Queen avança até antes da peça aliada.
+Queen não atravessa aliado.
+
+Caso 2 — confronto adversário dentro do alcance:
+[QW9][][][][KB3][][][]
+-turn>
+[][][][QW6][][][]
+
+Leitura:
+Queen encontra inimigo dentro do alcance.
+Queen avança até o confronto.
+Aplica dano normal.
+Recebe dano simultâneo.
+Queen sobrevive com 6.
+
+Caso 3 — inimigo fora do alcance máximo:
+[QW9][][][][][][][KB3]
+-turn>
+[][][][][][QW9][KB3][]
+
+Leitura:
+Queen não alcança o inimigo porque ele está além de 5 slots.
+Queen avança o máximo permitido.
+
+26.2 Knight 2x em território adversário
+Cavalos causam 2x mais dano em peças localizadas no território adversário.
+O território adversário é calculado com base no dono do Knight.
+
+Exemplo:
+Knight White atacando peça em território Black: dano x2.
+Knight White atacando peça fora do território Black: dano normal.
+
+Com Multidão:
+Knight base = 3
+Multidão = +1
+Multiplicador = 2x
+(3 + 1) x 2 = 8
+
+26.3 Knight ignora colisão com Pawns
+Cavalos ignoram colisão com peões.
+
+Na prática:
+Se o Knight iria colidir com um Pawn, ele anda 1 slot a mais para ultrapassar esse Pawn.
+
+Se o slot após o Pawn estiver vazio, Knight ocupa esse slot.
+Se o slot após o Pawn estiver ocupado por inimigo, ocorre confronto normal.
+Se o slot após o Pawn estiver ocupado por aliado, aplica bloqueio por aliado.
+
+Não deve haver engarrafamento causado por esse pulo, pois a prioridade do CL1 determina que a unidade que já andou mais slots se move primeiro.
+
+Exemplos:
+[][][][PW1][PW1][KB3][][]
+->
+[][][][KB3][PW1][PW1][][]
+
+[][][][KB3][PW1][KB3][][]
+->
+[][][KB3][][KB3][PW1][][]
+
+[][][BW3][PW1][KB3][][][]
+->
+[][][][][PW1][][][]
+
+26.4 Pawn 4x damage vs King
+Peões causam 4x damage contra King.
+Visualmente, essa regra pode ser comunicada como instakill, mas tecnicamente a implementação deve ser multiplicador de dano.
+
+Exemplo sem Multidão:
+Pawn base = 1
+Contra King = 4x
+1 x 4 = 4
+
+Exemplo com Multidão:
+Pawn base = 1
+Multidão = +1
+Contra King = 4x
+(1 + 1) x 4 = 8
+
+
+27. UI/UX
+
+27.1 Escopo de UI
+Menu principal e criação de sala ficam fora deste GDD.
+Menu principal, criação de sala, Vibi-network, AWS e network serão descritos separadamente no prompt de implementação/Codex.
+
+A UI do CL2 deve se basear no CL1:
+- interface legível
+- centralizada
+- esteira horizontal clara
+- slots segmentados
+- peças com vida/dano visíveis
+- feedbacks curtos de resolução
+
+27.2 Placar
+Durante os turnos, acima da esteira, a UI deve exibir o placar.
+White score à esquerda.
+Black score à direita.
+
+Formato de valores:
+0 / 0,5 / 1 / 1,5 / 2 / 2,5 / 3
+
+Exemplo:
+White: 1,5                                      Black: 1
+[WK4][ ][ ][ ][ ][ ][ ][ ][ ][BK4]
+
+O placar atualiza após o fim de cada Round.
+
+27.3 UI de Picks
+A UI de Picks deve manter o espaçamento centralizado das cartas tanto na situação de 3 opções quanto na situação de 4 opções.
+
+Pick 1: 3 cartas centralizadas.
+Pick 2: 3 cartas centralizadas.
+Pick 3: 4 cartas centralizadas.
+
+Quando uma opção for escolhida por um jogador, ela deve ficar indisponível para o outro jogador naquele mesmo Pick.
+
+27.4 UI de Buffs
+Buffs devem ser exibidos na parte superior da esteira.
+
+Buff ativo = asset colorido.
+Buff inativo/desabilitado = asset gray.
+
+Mapeamento:
+buff_regen.png       = Crescimento ativo
+buff_regen_gray.png  = Crescimento inativo
+buff_dmg.png         = Multidão ativo
+buff_dmg_gray.png    = Multidão inativo
+buff_ramp.png        = Atropelamento ativo
+buff_ramp_gray.png   = Atropelamento inativo
+
+Buffs ativos permanecem visíveis nos rounds seguintes, pois são globais e permanentes.
+
+27.5 UI de Tags de Transformação
+Tags representam Transformações.
+
+Regra visual:
+- Tags devem acompanhar a peça.
+- Tags devem redimensionar junto com a peça.
+- Tags devem desaparecer junto com a peça quando ela morrer.
+
+A tag é um adereço visual da peça, assim como vida e dano no CL1.
+A tag deve ser pequena, próxima da peça, sem poluir o slot e sem ocupar o espaço principal da peça.
+
+Exemplo conceitual:
+[W_Knight.png]
+vida: 3
+dano: 3
+tag_2x.png
+
+Se a peça morrer:
+- peça desaparece
+- vida desaparece
+- dano desaparece
+- tag desaparece
+
+
+28. Assets
+
+Lista de assets:
+text_round1.png
+text_round2.ping
+text_final_round.png
+
+tag_2x.png
+tag_void.png
+tag_dur.png
+tag_spd.png
+tag_pen.png
+tag_ik.png
+
+buff_regen.png
+buff_regen_gray.png
+buff_dmg.png
+buff_dmg_gray.png
+buff_ramp.png
+buff_ramp_gray.png
+
+B_Pawn.png
+W_Pawn.png
+B_Knight.png
+W_Knight.png
+B_Bishop.png
+W_Bishop.png
+B_King.png
+W_King.png
+B_Rook.png
+W_Rook.png
+B_Queen.png
+W_Queen.png
+
+Observação:
+text_round2.ping deve ser mantido exatamente assim se esse for o nome real do arquivo.
+Caso seja erro de digitação, o asset correto esperado provavelmente seria text_round2.png.
+
+Convenção:
+tag_ = Transformações
+buff_ = Buffs
+_gray = estado inativo/desabilitado
+W_ = peça White
+B_ = peça Black
+
+Assets de Round:
+Round 1: exibir text_round1.png
+Round 2: exibir text_round2.ping
+Final Round: exibir text_final_round.png
+
+
+29. Modelo de Estado para SPEC
+
+29.1 Estado por peça
+Cada peça em campo deve carregar pelo menos:
+- piece_id estável
+- tipo da peça
+- cor/dono
+- vida atual
+- vida máxima
+- dano base
+- posição atual
+- contador de enjoo
+- contador de movimentos realizados
+- ordem/tempo de entrada em campo
+- estado vivo/morto
+- tags visuais ativas derivadas dos efeitos globais
+
+29.2 Estado por jogador
+Cada jogador deve carregar:
+- player_id
+- cor
+- draft escolhido
+- peso total do draft
+- estoque atual do Round
+- commit atual de invocação
+- slot do commit atual
+- pontuação acumulada
+- resultado dos rounds
+- king state
+
+29.3 Estado global
+O estado global deve carregar:
+- round atual
+- turno atual
+- phase atual
+- board atual
+- efeitos globais ativos
+- buffs escolhidos
+- transforms escolhidas
+- vencedor do round atual
+- pontuação de cada jogador
+- vencedor final, se houver
+- histórico opcional para replay/spec/debug
+
+
+30. Imutabilidade e Bend
+
+Como o jogo trabalha com Bend/determinismo, peças devem ser tratadas como estruturas imutáveis.
+
+Regra:
+Peça antiga não é modificada diretamente.
+A lógica calcula uma nova versão da peça.
+O GameState passa a apontar para essa nova versão.
+
+Exemplo:
+Antes:
+PieceState { id: 3, type: Knight, hp: 3, position: 4 }
+
+Evento:
+Knight recebe 1 de dano.
+
+Depois:
+PieceState { id: 3, type: Knight, hp: 2, position: 4 }
+
+O piece_id pode continuar o mesmo, pois a identidade lógica é preservada.
+A estrutura em si deve ser uma nova versão de estado.
+
+Efeitos globais devem ser armazenados como regras ativas no estado global, não como mutações permanentes individuais aplicadas manualmente em cada peça antiga.
+
+Exemplo:
+global_effects:
+- BUFF_MULTIDAO
+- TRANSFORM_KNIGHT_IGNORE_PAWN_COLLISION
+- TRANSFORM_QUEEN_ADVANCE_UP_TO_5
+
+
+31. Determinismo
+
+O comportamento deve ser 100% reproduzível para o mesmo estado inicial e a mesma sequência de inputs.
+
+Requisitos:
+- mesma ordem de resolução sempre
+- mesma prioridade de movimento sempre
+- mesmo resultado para colisões sempre
+- nenhuma aleatoriedade verdadeira
+- efeitos visuais não alteram lógica
+- commits resolvidos apenas na phase apropriada
+- picks aplicados apenas no momento apropriado
+- vitória de Round contabilizada imediatamente quando um rei morre
+
+O sistema deve permitir inspeção de:
+- estado antes de cada phase
+- ações resolvidas na phase
+- estado depois da phase
+- efeitos globais ativos
+- pontuação atual
+- histórico de rounds
+
+
+32. Casos de Borda
+
+Slot de invocação ocupado no commit, mas livre na resolução:
+A invocação deve funcionar normalmente. A validação real ocorre na Summon Resolution Phase.
+
+Slot livre no commit, mas ocupado na resolução:
+A invocação falha e a peça não é consumida.
+
+Peça com enjoo sendo atacada:
+A peça recebe dano normalmente.
+
+Peça morrendo em confronto:
+Ela ainda causa dano naquele mesmo confronto.
+
+Morte de rei durante White Collision:
+O Round termina imediatamente nessa phase.
+
+Morte de rei durante Black Collision:
+O Round termina imediatamente nessa phase.
+
+Empate de Round:
+Ocorre quando não existe nenhuma peça viva no tabuleiro além dos reis e todos os estoques disponíveis para invocação no Round foram usados. Ambos recebem 0,5 ponto.
+
+Empate final:
+Se ambos terminarem a run com a mesma pontuação, o resultado final é empate.
+
+Dois jogadores tentando escolher o mesmo Pick:
+A primeira escolha confirmada bloqueia aquela opção. O outro jogador deve escolher outra opção disponível.
+
+Efeito global em peça futura:
+Efeitos globais afetam peças invocadas depois da escolha.
+
+Atropelamento com mais de um alvo adicional:
+Não permitido. O excedente pode atingir no máximo 1 alvo adicional.
+
+Tower com redução de dano:
+Dano reduzido não deve ficar negativo. Dano final mínimo = 0.
+
+
+33. Relatório Final
+
+O relatório final deve ser simples.
+
+Exibir:
+- resultado final
+- time draftado pelo jogador vencedor
+
+Se houver empate:
+- exibir resultado final como empate
+
+Não precisa exibir:
+- picks escolhidos
+- histórico completo
+- dano causado
+- peças restantes
+- rounds detalhados
+- estatísticas avançadas
+
+
+34. Critérios de Aceite
+
+O jogo está correto quando:
+
+1. O board possui 10 slots funcionais com reis fixos nas extremidades.
+2. White avança para a direita e Black para a esquerda.
+3. O Draft permite escolher quantidades livres até peso 20.
+4. King é incluso automaticamente e pesa 0.
+5. O Draft define o estoque do jogador.
+6. O estoque do Draft é restaurado a cada Round.
+7. O core loop segue Draft -> Round -> Pick -> Round -> Pick -> Round -> Pick -> Final Round -> Relatório.
+8. Cada Round usa as phases herdadas do CL1.
+9. Dano em confronto é simultâneo.
+10. Peças mortas ainda causam dano no confronto em que morreram.
+11. Peças são removidas antes da próxima phase.
+12. Invocações entram apenas na Summon Resolution Phase.
+13. Invocações falham se o slot estiver ocupado na resolução.
+14. Invocações falhas não consomem peça.
+15. Unidades invocadas entram com 1 turno de enjoo.
+16. Prioridade por movimentos realizados evita engarrafamento próprio.
+17. Vitória de Round é contabilizada imediatamente quando um rei morre.
+18. Vitória de Round vale 1 ponto.
+19. Empate de Round vale 0,5 ponto.
+20. Derrota de Round vale 0 ponto.
+21. Placar é exibido acima da esteira, White à esquerda e Black à direita.
+22. Picks são simultâneos.
+23. Não é possível escolher o mesmo Buff duas vezes no mesmo Pick.
+24. Não é possível escolher a mesma Transform duas vezes no mesmo Pick.
+25. Buffs são globais, simétricos, permanentes e afetam peças futuras.
+26. Transforms são globais, simétricas, permanentes e afetam peças futuras do tipo correspondente.
+27. Multidão aplica +1 dano antes de multiplicadores.
+28. Crescimento cura 1 ao mover, sem sobrecura.
+29. Atropelamento afeta no máximo 1 alvo adicional.
+30. Bishop atinge sequência de unidades iguais até a sequência ser interrompida.
+31. Tower reduz dano recebido em 1.
+32. Queen avança até 5 slots respeitando aliado, confronto e alcance máximo.
+33. Knight pode ultrapassar Pawns conforme regra da Transform.
+34. Pawn causa 4x damage contra King quando a Transform estiver ativa.
+35. Tags acompanham, redimensionam e desaparecem junto com a peça.
+36. Buffs aparecem acima da esteira com versão colorida ou gray.
+37. UI de Picks centraliza cartas tanto com 3 quanto com 4 opções.
+38. Relatório final mostra resultado e time draftado do vencedor.
+39. Toda execução é reproduzível em SPEC mode.
+
+
+35. Resumo Executivo para Implementação
+
+Chess Line 2 é um jogo 1v1 determinístico em esteira linear de 10 slots, herdando movimento, colisão, dano simultâneo, invocação e enjoo do Chess Line 1. O CL2 adiciona Draft, Rounds, Picks globais, pontuação e progressão entre rounds.
+
+Cada jogador começa com um King automático e monta um estoque por Draft até peso 20. O peso de cada peça comum é igual à vida inicial: Pawn 1, Bishop 3, Knight 3, Tower 5, Queen 9. King pesa 0 e não é draftável.
+
+O estoque do Draft é usado dentro do Round e restaurado no próximo Round. Entre rounds, board, peças e vida resetam. Apenas efeitos globais permanecem.
+
+Core loop:
+Draft -> Round 1 -> Pick Buff -> Round 2 -> Pick Transform -> Round 3 -> Pick Transform -> Final Round -> Relatório.
+
+Cada Round pontua:
+Vitória = 1
+Empate = 0,5
+Derrota = 0
+
+O maior montante define o vencedor final, mas pode haver empate.
+
+Picks são simultâneos. Dois jogadores não podem escolher a mesma opção no mesmo Pick. As escolhas de ambos entram como efeitos globais, simétricos, permanentes e aplicáveis a peças atuais e futuras.
+
+Buffs:
+Multidão = todas as peças ganham +1 dano.
+Crescimento = peça cura 1 ao mover se estiver machucada.
+Atropelamento = dano excedente atinge até 1 alvo adicional.
+
+Pick 2 Transform:
+Pawn 2x vs Knight/Bishop.
+Bishop atinge sequência de unidades iguais.
+Tower reduz dano recebido em 1.
+
+Pick 3 Transform:
+Queen avança até 5 slots.
+Knight 2x em território adversário.
+Knight ignora colisão com Pawns.
+Pawn 4x damage vs King.
+
+UI:
+Placar acima da esteira, White à esquerda e Black à direita.
+Buffs acima da esteira com assets coloridos/gray.
+Tags pequenas próximas das peças, acompanhando escala e desaparecendo com a peça.
+Picks com cartas centralizadas em layouts de 3 ou 4 opções.
+
+Menu, criação de sala, AWS e Vibi-network ficam fora deste GDD e serão descritos no prompt de implementação.
