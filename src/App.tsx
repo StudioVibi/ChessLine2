@@ -1,13 +1,16 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronsRight,
+  Copy,
   Minus,
   Play,
   Plus,
   RotateCcw,
   Sparkles,
   StepForward,
+  Wifi,
+  WifiOff,
   X,
 } from "lucide-react";
 import { buffImages, effectTagImages, pieceImages, roundImages } from "./game/assets";
@@ -20,13 +23,7 @@ import {
   PIECE_STATS,
 } from "./game/constants";
 import {
-  advancePhase,
-  beginRound,
   canStartGame,
-  choosePick,
-  clearSummon,
-  commitSummon,
-  continueAfterRound,
   createInitialGameState,
   deriveBoard,
   formatBoard,
@@ -35,11 +32,18 @@ import {
   getDraftWeight,
   getPieceTransformTags,
   getRoundTitle,
-  resolveFullTurn,
-  resetGame,
-  setDraftCount,
-  startGame,
 } from "./game/engine";
+import {
+  createOnlineGame,
+  createRoomId,
+  makeAdvancePhasePost,
+  makeChoosePickPost,
+  makeClearSummonPost,
+  makeCommitSummonPost,
+  makeResolveFullTurnPost,
+  makeSetDraftCountPost,
+} from "./game/online";
+import type { OnlinePost } from "./game/online";
 import type { BuffId, CommonPieceType, EffectId, GameState, PieceCounts, PieceState, PlayerColor } from "./game/types";
 
 const presets: Record<string, PieceCounts> = {
@@ -47,17 +51,107 @@ const presets: Record<string, PieceCounts> = {
   Power: { pawn: 0, knight: 0, bishop: 2, rook: 1, queen: 1 },
 };
 
-export function App() {
-  const [game, setGame] = useState<GameState>(() => createInitialGameState());
+function useOnlineGame(room: string): {
+  state: GameState;
+  synced: boolean;
+  ping: number | null;
+  post: (postData: OnlinePost) => void;
+} {
+  const gameRef = useRef<ReturnType<typeof createOnlineGame> | null>(null);
+  const syncedRef = useRef(false);
+  const [state, setState] = useState<GameState>(() => createInitialGameState());
+  const [network, setNetwork] = useState<{ synced: boolean; ping: number | null }>({ synced: false, ping: null });
 
-  const run = (update: (state: GameState) => GameState) => {
-    setGame((current) => update(current));
+  useEffect(() => {
+    let cancelled = false;
+    const net = createOnlineGame(room);
+    gameRef.current = net;
+    syncedRef.current = false;
+    setState(createInitialGameState());
+    setNetwork({ synced: false, ping: null });
+
+    const refresh = () => {
+      if (cancelled) {
+        return;
+      }
+
+      if (!syncedRef.current) {
+        setState(createInitialGameState());
+        setNetwork({ synced: false, ping: null });
+        return;
+      }
+
+      setState(net.compute_render_state());
+      const ping = net.ping();
+      setNetwork({
+        synced: syncedRef.current,
+        ping: Number.isFinite(ping) ? Math.max(0, Math.round(ping)) : null,
+      });
+    };
+
+    net.on_sync(() => {
+      if (cancelled) {
+        return;
+      }
+
+      syncedRef.current = true;
+      refresh();
+    });
+
+    refresh();
+    const intervalId = window.setInterval(refresh, 125);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      net.close();
+      if (gameRef.current === net) {
+        gameRef.current = null;
+      }
+    };
+  }, [room]);
+
+  return {
+    state,
+    synced: network.synced,
+    ping: network.ping,
+    post: (postData: OnlinePost) => {
+      if (!syncedRef.current) {
+        return;
+      }
+
+      gameRef.current?.post(postData);
+    },
+  };
+}
+
+export function App() {
+  const [room] = useState(() => ensureRoomInUrl());
+  const [localColor, setLocalColor] = useState<PlayerColor>(() => getStoredColor());
+  const online = useOnlineGame(room);
+  const game = online.state;
+  const onlineReady = online.synced;
+
+  const post = (postData: OnlinePost) => {
+    online.post(postData);
   };
 
   const applyPreset = (color: PlayerColor, preset: PieceCounts) => {
-    setGame((current) =>
-      COMMON_PIECES.reduce((next, pieceType) => setDraftCount(next, color, pieceType, preset[pieceType]), current),
-    );
+    for (const pieceType of COMMON_PIECES) {
+      post(makeSetDraftCountPost(color, pieceType, 0));
+    }
+    for (const pieceType of COMMON_PIECES) {
+      post(makeSetDraftCountPost(color, pieceType, preset[pieceType]));
+    }
+  };
+
+  const chooseColor = (color: PlayerColor) => {
+    setLocalColor(color);
+    window.localStorage.setItem("chess-line-2-color", color);
+  };
+
+  const copyRoomLink = () => {
+    void navigator.clipboard?.writeText(getRoomUrl(room));
   };
 
   return (
@@ -65,40 +159,80 @@ export function App() {
       <header className="topbar">
         <div>
           <h1>Chess Line 2</h1>
-          <p>Deterministic local SPEC mode</p>
+          <p>Online deterministic room</p>
         </div>
-        <button className="ghost-button" onClick={() => setGame(resetGame())}>
-          <RotateCcw size={18} />
-          Reset
-        </button>
+        <div className="online-controls">
+          <div className={onlineReady ? "network-pill synced" : "network-pill"} title={onlineReady ? "Synced" : "Syncing"}>
+            {onlineReady ? <Wifi size={17} /> : <WifiOff size={17} />}
+            <span>{onlineReady ? `${formatPing(online.ping)} ms` : "Syncing"}</span>
+          </div>
+          <div className="room-pill">
+            <span>Room</span>
+            <strong>{room}</strong>
+            <button className="icon-button" title="Copy room link" onClick={copyRoomLink}>
+              <Copy size={16} />
+            </button>
+          </div>
+          <div className="side-switch" role="group" aria-label="Player side">
+            <button className={localColor === "white" ? "selected" : ""} onClick={() => chooseColor("white")}>
+              White
+            </button>
+            <button className={localColor === "black" ? "selected" : ""} onClick={() => chooseColor("black")}>
+              Black
+            </button>
+          </div>
+          <button className="ghost-button" disabled={!onlineReady} onClick={() => post({ $: "reset" })}>
+            <RotateCcw size={18} />
+            Reset
+          </button>
+        </div>
       </header>
 
       {game.stage === "draft" && (
         <DraftScreen
           game={game}
-          onDraftChange={(color, pieceType, count) => run((state) => setDraftCount(state, color, pieceType, count))}
+          localColor={localColor}
+          onlineReady={onlineReady}
+          onDraftChange={(color, pieceType, count) => post(makeSetDraftCountPost(color, pieceType, count))}
           onPreset={applyPreset}
-          onStart={() => run(startGame)}
+          onStart={() => post({ $: "startGame" })}
         />
       )}
 
-      {game.stage === "roundIntro" && <RoundIntro game={game} onBegin={() => run(beginRound)} />}
+      {game.stage === "roundIntro" && (
+        <RoundIntro game={game} onlineReady={onlineReady} onBegin={() => post({ $: "beginRound", round: game.round })} />
+      )}
 
       {game.stage === "battle" && (
         <BattleScreen
           game={game}
-          onCommit={(color, pieceType, special) => run((state) => commitSummon(state, color, pieceType, special))}
-          onClear={(color) => run((state) => clearSummon(state, color))}
-          onStep={() => run(advancePhase)}
-          onTurn={() => run(resolveFullTurn)}
+          localColor={localColor}
+          onlineReady={onlineReady}
+          onCommit={(color, pieceType, special) => post(makeCommitSummonPost(color, pieceType, special))}
+          onClear={(color) => post(makeClearSummonPost(color))}
+          onStep={() => post(makeAdvancePhasePost(game))}
+          onTurn={() => post(makeResolveFullTurnPost(game))}
         />
       )}
 
-      {game.stage === "roundResult" && <RoundResult game={game} onContinue={() => run(continueAfterRound)} />}
+      {game.stage === "roundResult" && (
+        <RoundResult
+          game={game}
+          onlineReady={onlineReady}
+          onContinue={() => post({ $: "continueAfterRound", round: game.round })}
+        />
+      )}
 
-      {game.stage === "pick" && <PickScreen game={game} onPick={(color, effect) => run((state) => choosePick(state, color, effect))} />}
+      {game.stage === "pick" && (
+        <PickScreen
+          game={game}
+          localColor={localColor}
+          onlineReady={onlineReady}
+          onPick={(color, effect) => post(makeChoosePickPost(color, effect))}
+        />
+      )}
 
-      {game.stage === "report" && <ReportScreen game={game} onRestart={() => setGame(resetGame())} />}
+      {game.stage === "report" && <ReportScreen game={game} onlineReady={onlineReady} onRestart={() => post({ $: "reset" })} />}
 
       <EventLog events={game.eventLog} />
     </main>
@@ -107,11 +241,15 @@ export function App() {
 
 function DraftScreen({
   game,
+  localColor,
+  onlineReady,
   onDraftChange,
   onPreset,
   onStart,
 }: {
   game: GameState;
+  localColor: PlayerColor;
+  onlineReady: boolean;
   onDraftChange: (color: PlayerColor, pieceType: CommonPieceType, count: number) => void;
   onPreset: (color: PlayerColor, preset: PieceCounts) => void;
   onStart: () => void;
@@ -119,11 +257,23 @@ function DraftScreen({
   return (
     <section className="screen-stack">
       <div className="draft-grid">
-        <DraftPanel color="white" game={game} onDraftChange={onDraftChange} onPreset={onPreset} />
-        <DraftPanel color="black" game={game} onDraftChange={onDraftChange} onPreset={onPreset} />
+        <DraftPanel
+          color="white"
+          game={game}
+          disabled={!onlineReady || localColor !== "white"}
+          onDraftChange={onDraftChange}
+          onPreset={onPreset}
+        />
+        <DraftPanel
+          color="black"
+          game={game}
+          disabled={!onlineReady || localColor !== "black"}
+          onDraftChange={onDraftChange}
+          onPreset={onPreset}
+        />
       </div>
       <div className="start-row">
-        <button className="primary-button" disabled={!canStartGame(game)} onClick={onStart}>
+        <button className="primary-button" disabled={!onlineReady || !canStartGame(game)} onClick={onStart}>
           <Play size={18} />
           Start Run
         </button>
@@ -135,11 +285,13 @@ function DraftScreen({
 function DraftPanel({
   color,
   game,
+  disabled,
   onDraftChange,
   onPreset,
 }: {
   color: PlayerColor;
   game: GameState;
+  disabled: boolean;
   onDraftChange: (color: PlayerColor, pieceType: CommonPieceType, count: number) => void;
   onPreset: (color: PlayerColor, preset: PieceCounts) => void;
 }) {
@@ -147,7 +299,7 @@ function DraftPanel({
   const weight = getDraftWeight(draft);
 
   return (
-    <section className={`panel player-panel ${color}`}>
+    <section className={`panel player-panel ${color} ${disabled ? "readonly" : ""}`}>
       <div className="panel-heading">
         <h2>{capitalize(color)} Draft</h2>
         <span className={weight > DRAFT_WEIGHT_LIMIT ? "weight danger" : "weight"}>
@@ -160,7 +312,7 @@ function DraftPanel({
       </div>
       <div className="preset-row">
         {Object.entries(presets).map(([name, preset]) => (
-          <button key={name} className="small-button" onClick={() => onPreset(color, preset)}>
+          <button key={name} className="small-button" disabled={disabled} onClick={() => onPreset(color, preset)}>
             <Check size={15} />
             {name}
           </button>
@@ -185,7 +337,7 @@ function DraftPanel({
                 <button
                   className="icon-button"
                   title={`Remove ${stats.label}`}
-                  disabled={count <= 0}
+                  disabled={disabled || count <= 0}
                   onClick={() => onDraftChange(color, pieceType, count - 1)}
                 >
                   <Minus size={16} />
@@ -194,7 +346,7 @@ function DraftPanel({
                 <button
                   className="icon-button"
                   title={`Add ${stats.label}`}
-                  disabled={!canAdd}
+                  disabled={disabled || !canAdd}
                   onClick={() => onDraftChange(color, pieceType, count + 1)}
                 >
                   <Plus size={16} />
@@ -208,14 +360,14 @@ function DraftPanel({
   );
 }
 
-function RoundIntro({ game, onBegin }: { game: GameState; onBegin: () => void }) {
+function RoundIntro({ game, onlineReady, onBegin }: { game: GameState; onlineReady: boolean; onBegin: () => void }) {
   return (
     <section className="intro-screen">
       <ScoreBar game={game} />
       <div className="round-mark">
         {roundImages[game.round] ? <img src={roundImages[game.round]} alt={getRoundTitle(game.round)} /> : <h2>{getRoundTitle(game.round)}</h2>}
       </div>
-      <button className="primary-button" onClick={onBegin}>
+      <button className="primary-button" disabled={!onlineReady} onClick={onBegin}>
         <Play size={18} />
         Begin {getRoundTitle(game.round)}
       </button>
@@ -225,12 +377,16 @@ function RoundIntro({ game, onBegin }: { game: GameState; onBegin: () => void })
 
 function BattleScreen({
   game,
+  localColor,
+  onlineReady,
   onCommit,
   onClear,
   onStep,
   onTurn,
 }: {
   game: GameState;
+  localColor: PlayerColor;
+  onlineReady: boolean;
   onCommit: (color: PlayerColor, pieceType: CommonPieceType, special: boolean) => void;
   onClear: (color: PlayerColor) => void;
   onStep: () => void;
@@ -242,18 +398,30 @@ function BattleScreen({
       <BuffBar game={game} />
       <Board game={game} />
       <div className="battle-controls">
-        <button className="primary-button" onClick={onStep}>
+        <button className="primary-button" disabled={!onlineReady} onClick={onStep}>
           <StepForward size={18} />
           Next Phase
         </button>
-        <button className="secondary-button" onClick={onTurn}>
+        <button className="secondary-button" disabled={!onlineReady} onClick={onTurn}>
           <ChevronsRight size={18} />
           Resolve Turn
         </button>
       </div>
       <div className="summon-grid">
-        <SummonPanel color="white" game={game} onCommit={onCommit} onClear={onClear} />
-        <SummonPanel color="black" game={game} onCommit={onCommit} onClear={onClear} />
+        <SummonPanel
+          color="white"
+          game={game}
+          disabled={!onlineReady || localColor !== "white"}
+          onCommit={onCommit}
+          onClear={onClear}
+        />
+        <SummonPanel
+          color="black"
+          game={game}
+          disabled={!onlineReady || localColor !== "black"}
+          onCommit={onCommit}
+          onClear={onClear}
+        />
       </div>
       <SpecPanel game={game} />
     </section>
@@ -344,22 +512,24 @@ function PieceView({ piece, game }: { piece: PieceState; game: GameState }) {
 function SummonPanel({
   color,
   game,
+  disabled,
   onCommit,
   onClear,
 }: {
   color: PlayerColor;
   game: GameState;
+  disabled: boolean;
   onCommit: (color: PlayerColor, pieceType: CommonPieceType, special: boolean) => void;
   onClear: (color: PlayerColor) => void;
 }) {
   const player = game.players[color];
 
   return (
-    <section className={`panel summon-panel ${color}`}>
+    <section className={`panel summon-panel ${color} ${disabled ? "readonly" : ""}`}>
       <div className="panel-heading">
         <h2>{capitalize(color)} Stock</h2>
         {player.pendingSummon ? (
-          <button className="small-button" onClick={() => onClear(color)}>
+          <button className="small-button" disabled={disabled} onClick={() => onClear(color)}>
             <X size={15} />
             Clear
           </button>
@@ -378,17 +548,17 @@ function SummonPanel({
       <div className="stock-list">
         {COMMON_PIECES.map((pieceType) => {
           const stock = player.stock[pieceType];
-          const disabled = stock <= 0;
+          const pieceDisabled = disabled || stock <= 0;
           return (
             <div className="stock-row" key={pieceType}>
               <img src={pieceImages[color][pieceType]} alt="" />
               <strong>{PIECE_STATS[pieceType].label}</strong>
               <span>x{stock}</span>
-              <button disabled={disabled} className="small-button" onClick={() => onCommit(color, pieceType, false)}>
+              <button disabled={pieceDisabled} className="small-button" onClick={() => onCommit(color, pieceType, false)}>
                 <Plus size={15} />
                 Normal
               </button>
-              <button disabled={disabled} className="small-button" onClick={() => onCommit(color, pieceType, true)}>
+              <button disabled={pieceDisabled} className="small-button" onClick={() => onCommit(color, pieceType, true)}>
                 <Sparkles size={15} />
                 Special
               </button>
@@ -400,7 +570,17 @@ function SummonPanel({
   );
 }
 
-function PickScreen({ game, onPick }: { game: GameState; onPick: (color: PlayerColor, effect: EffectId) => void }) {
+function PickScreen({
+  game,
+  localColor,
+  onlineReady,
+  onPick,
+}: {
+  game: GameState;
+  localColor: PlayerColor;
+  onlineReady: boolean;
+  onPick: (color: PlayerColor, effect: EffectId) => void;
+}) {
   const pick = game.pick;
 
   if (!pick) {
@@ -417,8 +597,8 @@ function PickScreen({ game, onPick }: { game: GameState; onPick: (color: PlayerC
       <div className={`pick-grid count-${options.length}`}>
         {options.map((effect) => {
           const chosenBy = getChosenBy(pick.choices, effect);
-          const disabledForWhite = Boolean(pick.choices.white || chosenBy);
-          const disabledForBlack = Boolean(pick.choices.black || chosenBy);
+          const disabledForWhite = !onlineReady || localColor !== "white" || Boolean(pick.choices.white || chosenBy);
+          const disabledForBlack = !onlineReady || localColor !== "black" || Boolean(pick.choices.black || chosenBy);
 
           return (
             <article className={chosenBy ? "pick-card chosen" : "pick-card"} key={effect}>
@@ -453,7 +633,15 @@ function EffectArt({ effect }: { effect: EffectId }) {
   return <img className="effect-art tag-art" src={effectTagImages[effect as keyof typeof effectTagImages]} alt="" />;
 }
 
-function RoundResult({ game, onContinue }: { game: GameState; onContinue: () => void }) {
+function RoundResult({
+  game,
+  onlineReady,
+  onContinue,
+}: {
+  game: GameState;
+  onlineReady: boolean;
+  onContinue: () => void;
+}) {
   const resultText =
     game.roundWinner === "draw" ? "Round Draw" : `${capitalize(game.roundWinner ?? "white")} Wins ${getRoundTitle(game.round)}`;
 
@@ -466,7 +654,7 @@ function RoundResult({ game, onContinue }: { game: GameState; onContinue: () => 
           <p key={`${event}-${index}`}>{event}</p>
         ))}
       </div>
-      <button className="primary-button" onClick={onContinue}>
+      <button className="primary-button" disabled={!onlineReady} onClick={onContinue}>
         <Play size={18} />
         {game.round >= 4 ? "Final Report" : "Continue"}
       </button>
@@ -474,7 +662,15 @@ function RoundResult({ game, onContinue }: { game: GameState; onContinue: () => 
   );
 }
 
-function ReportScreen({ game, onRestart }: { game: GameState; onRestart: () => void }) {
+function ReportScreen({
+  game,
+  onlineReady,
+  onRestart,
+}: {
+  game: GameState;
+  onlineReady: boolean;
+  onRestart: () => void;
+}) {
   const winner = game.finalWinner;
   const title = winner === "draw" ? "Final Result: Draw" : `Final Result: ${capitalize(winner ?? "white")} Wins`;
   const winnerDraft = winner === "white" || winner === "black" ? game.players[winner].draft : undefined;
@@ -497,7 +693,7 @@ function ReportScreen({ game, onRestart }: { game: GameState; onRestart: () => v
           </div>
         </div>
       )}
-      <button className="primary-button" onClick={onRestart}>
+      <button className="primary-button" disabled={!onlineReady} onClick={onRestart}>
         <RotateCcw size={18} />
         New Run
       </button>
@@ -542,6 +738,38 @@ function EventLog({ events }: { events: string[] }) {
       ))}
     </aside>
   );
+}
+
+function ensureRoomInUrl(): string {
+  const url = new URL(window.location.href);
+  const current = url.searchParams.get("room");
+  const room = sanitizeRoom(current) ?? createRoomId();
+
+  if (room !== current) {
+    url.searchParams.set("room", room);
+    window.history.replaceState(null, "", url);
+  }
+
+  return room;
+}
+
+function getRoomUrl(room: string): string {
+  const url = new URL(window.location.href);
+  url.searchParams.set("room", room);
+  return url.toString();
+}
+
+function sanitizeRoom(value: string | null): string | undefined {
+  const room = value?.trim().replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 48);
+  return room || undefined;
+}
+
+function getStoredColor(): PlayerColor {
+  return window.localStorage.getItem("chess-line-2-color") === "black" ? "black" : "white";
+}
+
+function formatPing(ping: number | null): string {
+  return ping === null ? "--" : `${ping}`;
 }
 
 function getChosenBy(choices: Partial<Record<PlayerColor, EffectId>>, effect: EffectId): PlayerColor | undefined {

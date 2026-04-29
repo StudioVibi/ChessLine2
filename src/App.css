@@ -50,6 +50,83 @@ button:disabled {
   margin-bottom: 20px;
 }
 
+.online-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.network-pill,
+.room-pill,
+.side-switch {
+  border: 1px solid #3c463f;
+  border-radius: 8px;
+  background: #171d19;
+}
+
+.network-pill,
+.room-pill {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.network-pill {
+  color: #d9b5a6;
+  font-weight: 800;
+}
+
+.network-pill.synced {
+  color: #b8dba6;
+}
+
+.room-pill span {
+  color: #aeb9a5;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.room-pill strong {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+.room-pill .icon-button {
+  width: 30px;
+  min-height: 30px;
+}
+
+.side-switch {
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 3px;
+  gap: 3px;
+}
+
+.side-switch button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #b5bdac;
+  padding: 0 10px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.side-switch button.selected {
+  background: #314238;
+  color: #fff7e7;
+}
+
 .topbar h1,
 .topbar p,
 .panel h2,
@@ -148,6 +225,10 @@ button:disabled {
 
 .panel {
   padding: 16px;
+}
+
+.panel.readonly {
+  border-color: #2b332e;
 }
 
 .player-panel.white {
@@ -698,6 +779,22 @@ code {
 
   .topbar {
     flex-direction: column;
+  }
+
+  .online-controls {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .network-pill,
+  .room-pill,
+  .side-switch,
+  .online-controls .ghost-button {
+    flex: 1 1 100%;
+  }
+
+  .room-pill strong {
+    max-width: none;
   }
 
   .scorebar {
