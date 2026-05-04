@@ -3,16 +3,19 @@ import { EMPTY_COUNTS } from "./constants";
 import {
   advancePhase,
   beginRound,
-  choosePick,
   clearSummon,
+  commitPick,
   commitSummon,
   continueAfterRound,
   createInitialGameState,
   createPiece,
   formatBoard,
+  revealPick,
+  revealSummon,
   setDraftCount,
   startGame,
 } from "./engine";
+import { createPickCommitment, createSummonCommitment } from "./secrets";
 import type { GameState, PieceState } from "./types";
 
 function battleState(pieces: PieceState[], patch: Partial<GameState> = {}): GameState {
@@ -33,6 +36,48 @@ function battleState(pieces: PieceState[], patch: Partial<GameState> = {}): Game
     nextEntryOrder: 100,
     ...patch,
   };
+}
+
+function sealedSummon(color: "white" | "black", pieceType: "pawn", special = false, nonce = `${color}-summon`) {
+  return {
+    hash: createSummonCommitment({ color, round: 1, turn: 1, pieceType, special, nonce }),
+    reveal: {
+      pieceType,
+      slot: color === "white" ? (special ? 2 : 1) : special ? 7 : 8,
+      special,
+    },
+  } as const;
+}
+
+function commitAndRevealPick(
+  state: GameState,
+  whiteEffect: "crowd" | "growth",
+  blackEffect: "crowd" | "growth",
+): GameState {
+  const kind = state.pick?.kind ?? "buff";
+  const whiteNonce = "white-pick";
+  const blackNonce = "black-pick";
+  const whiteHash = createPickCommitment({
+    color: "white",
+    round: state.round,
+    kind,
+    effect: whiteEffect,
+    nonce: whiteNonce,
+  });
+  const blackHash = createPickCommitment({
+    color: "black",
+    round: state.round,
+    kind,
+    effect: blackEffect,
+    nonce: blackNonce,
+  });
+
+  state = commitPick(state, "white", whiteHash);
+  state = commitPick(state, "black", blackHash);
+  state = revealPick(state, "white", whiteEffect, whiteNonce);
+  state = revealPick(state, "black", blackEffect, blackNonce);
+
+  return state;
 }
 
 describe("Chess Line 2 engine", () => {
@@ -77,7 +122,7 @@ describe("Chess Line 2 engine", () => {
         white: {
           ...createInitialGameState().players.white,
           stock: { ...EMPTY_COUNTS, pawn: 1 },
-          pendingSummon: { pieceType: "pawn", slot: 1, special: false },
+          pendingSummon: sealedSummon("white", "pawn"),
         },
         black: { ...createInitialGameState().players.black, stock: { ...EMPTY_COUNTS } },
       },
@@ -90,15 +135,80 @@ describe("Chess Line 2 engine", () => {
     expect(state.pieces.filter((piece) => piece.owner === "white" && piece.type === "pawn")).toHaveLength(0);
   });
 
+  it("lets newly summoned pieces move on their next movement phase", () => {
+    const whiteKing = createPiece("king", "white", 0, 1, 1);
+    const blackKing = createPiece("king", "black", 9, 2, 2);
+    let state = battleState([whiteKing, blackKing], {
+      phase: "summon",
+      players: {
+        white: {
+          ...createInitialGameState().players.white,
+          stock: { ...EMPTY_COUNTS, pawn: 1 },
+          pendingSummon: sealedSummon("white", "pawn"),
+        },
+        black: { ...createInitialGameState().players.black, stock: { ...EMPTY_COUNTS } },
+      },
+    });
+
+    state = advancePhase(state);
+    expect(state.phase).toBe("whiteMove");
+    expect(state.turn).toBe(2);
+    expect(state.pieces.find((piece) => piece.owner === "white" && piece.type === "pawn")?.position).toBe(1);
+
+    state = advancePhase(state);
+    expect(state.pieces.find((piece) => piece.owner === "white" && piece.type === "pawn")?.position).toBe(2);
+  });
+
+  it("waits at summon resolution until sealed summon inputs are revealed", () => {
+    const whiteKing = createPiece("king", "white", 0, 1, 1);
+    const blackKing = createPiece("king", "black", 9, 2, 2);
+    let state = battleState([whiteKing, blackKing], {
+      phase: "summon",
+      players: {
+        white: {
+          ...createInitialGameState().players.white,
+          stock: { ...EMPTY_COUNTS, pawn: 1 },
+          pendingSummon: {
+            hash: createSummonCommitment({
+              color: "white",
+              round: 1,
+              turn: 1,
+              pieceType: "pawn",
+              special: false,
+              nonce: "waiting",
+            }),
+          },
+        },
+        black: { ...createInitialGameState().players.black, stock: { ...EMPTY_COUNTS } },
+      },
+    });
+
+    state = advancePhase(state);
+
+    expect(state.phase).toBe("summon");
+    expect(state.turn).toBe(1);
+    expect(state.players.white.pendingSummon).toBeDefined();
+  });
+
   it("restores draft stock when a new round begins", () => {
     let state = createInitialGameState();
     state = setDraftCount(state, "white", "pawn", 1);
     state = setDraftCount(state, "black", "pawn", 1);
     state = startGame(state);
     state = beginRound(state);
-    state = commitSummon(state, "white", "pawn", false);
+    const nonce = "restore-stock";
+    const hash = createSummonCommitment({
+      color: "white",
+      round: state.round,
+      turn: state.turn,
+      pieceType: "pawn",
+      special: false,
+      nonce,
+    });
+    state = commitSummon(state, "white", hash);
     state = clearSummon(state, "black");
     state = { ...state, phase: "summon" };
+    state = revealSummon(state, "white", "pawn", false, nonce);
     state = advancePhase(state);
     expect(state.players.white.stock.pawn).toBe(0);
 
@@ -109,8 +219,7 @@ describe("Chess Line 2 engine", () => {
       round: 1,
     };
     state = continueAfterRound(state);
-    state = choosePick(state, "white", "crowd");
-    state = choosePick(state, "black", "growth");
+    state = commitAndRevealPick(state, "crowd", "growth");
     state = beginRound(state);
 
     expect(state.stage).toBe("battle");
@@ -118,16 +227,28 @@ describe("Chess Line 2 engine", () => {
     expect(state.players.black.stock.pawn).toBe(1);
   });
 
-  it("locks a pick option after the first player chooses it", () => {
+  it("keeps picks sealed until both players commit and rejects duplicate reveals", () => {
     let state = createInitialGameState();
     state = { ...state, stage: "roundResult", round: 1 };
     state = continueAfterRound(state);
-    state = choosePick(state, "white", "crowd");
-    state = choosePick(state, "black", "crowd");
+    const kind = state.pick?.kind ?? "buff";
+    const whiteHash = createPickCommitment({ color: "white", round: state.round, kind, effect: "crowd", nonce: "white" });
+    const blackHash = createPickCommitment({ color: "black", round: state.round, kind, effect: "crowd", nonce: "black" });
+
+    state = commitPick(state, "white", whiteHash);
+    expect(state.pick?.reveals.white).toBeUndefined();
+
+    state = revealPick(state, "white", "crowd", "white");
+    expect(state.pick?.reveals.white).toBeUndefined();
+
+    state = commitPick(state, "black", blackHash);
+    state = revealPick(state, "white", "crowd", "white");
+    state = revealPick(state, "black", "crowd", "black");
 
     expect(state.stage).toBe("pick");
-    expect(state.pick?.choices.white).toBe("crowd");
-    expect(state.pick?.choices.black).toBeUndefined();
+    expect(state.pick?.reveals.white).toBe("crowd");
+    expect(state.pick?.reveals.black).toBeUndefined();
+    expect(state.pick?.commitments.black).toBeUndefined();
   });
 
   it("tramples overkill into at most one additional target", () => {

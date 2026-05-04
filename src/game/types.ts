@@ -5,13 +5,7 @@ export type CommonPieceType = Exclude<PieceType, "king">;
 
 export type PieceCounts = Record<CommonPieceType, number>;
 
-export type BattlePhase =
-  | "whiteMove"
-  | "whiteCollision"
-  | "blackMove"
-  | "blackCollision"
-  | "sickness"
-  | "summon";
+export type BattlePhase = "whiteMove" | "whiteCollision" | "blackMove" | "blackCollision" | "summon";
 
 export type GameStage = "draft" | "roundIntro" | "battle" | "roundResult" | "pick" | "report";
 
@@ -48,7 +42,6 @@ export interface PieceState {
   maxHp: number;
   baseDamage: number;
   position: number;
-  sickness: number;
   moves: number;
   enteredAt: number;
   alive: boolean;
@@ -60,12 +53,17 @@ export interface PendingSummon {
   special: boolean;
 }
 
+export interface SealedSummon {
+  hash: string;
+  reveal?: PendingSummon;
+}
+
 export interface PlayerState {
   id: PlayerColor;
   color: PlayerColor;
   draft: PieceCounts;
   stock: PieceCounts;
-  pendingSummon?: PendingSummon;
+  pendingSummon?: SealedSummon;
   score: number;
   roundResults: RoundOutcome[];
 }
@@ -78,7 +76,8 @@ export interface PendingCombat {
 
 export interface PickState {
   kind: PickKind;
-  choices: Partial<Record<PlayerColor, EffectId>>;
+  commitments: Partial<Record<PlayerColor, string>>;
+  reveals: Partial<Record<PlayerColor, EffectId>>;
 }
 
 export interface HistoryEntry {

@@ -9,6 +9,7 @@ import {
   PICK_OPTIONS,
   PIECE_STATS,
 } from "./constants";
+import { createPickCommitment, createSummonCommitment } from "./secrets";
 import type {
   BattlePhase,
   BuffId,
@@ -17,7 +18,6 @@ import type {
   GameState,
   HistoryEntry,
   PendingCombat,
-  PendingSummon,
   PickKind,
   PieceCounts,
   PieceState,
@@ -172,14 +172,48 @@ export function beginRound(state: GameState): GameState {
   return maybeFinishDraw(withResetStocks);
 }
 
-export function commitSummon(
+export function commitSummon(state: GameState, color: PlayerColor, hash: string): GameState {
+  if (state.stage !== "battle") {
+    return state;
+  }
+
+  return updatePlayer(state, color, (player) => ({
+    ...player,
+    pendingSummon: { hash },
+  }));
+}
+
+export function revealSummon(
   state: GameState,
   color: PlayerColor,
   pieceType: CommonPieceType,
   special: boolean,
+  nonce: string,
 ): GameState {
-  if (state.stage !== "battle") {
+  if (state.stage !== "battle" || state.phase !== "summon") {
     return state;
+  }
+
+  const pending = state.players[color].pendingSummon;
+
+  if (!pending || pending.reveal) {
+    return state;
+  }
+
+  const expectedHash = createSummonCommitment({
+    color,
+    round: state.round,
+    turn: state.turn,
+    pieceType,
+    special,
+    nonce,
+  });
+
+  if (pending.hash !== expectedHash) {
+    return {
+      ...state,
+      eventLog: [`${capitalize(color)} summon reveal did not match the sealed input.`],
+    };
   }
 
   if (state.players[color].stock[pieceType] <= 0) {
@@ -189,15 +223,16 @@ export function commitSummon(
     };
   }
 
-  const pendingSummon: PendingSummon = {
-    pieceType,
-    slot: getSummonSlot(color, special),
-    special,
-  };
-
   return updatePlayer(state, color, (player) => ({
     ...player,
-    pendingSummon,
+    pendingSummon: {
+      ...pending,
+      reveal: {
+        pieceType,
+        slot: getSummonSlot(color, special),
+        special,
+      },
+    },
   }));
 }
 
@@ -238,18 +273,13 @@ export function advancePhase(state: GameState): GameState {
     }
     case "blackCollision": {
       after = resolveCollisionPhase(state);
-      after = after.stage === "battle" ? maybeFinishDraw({ ...after, phase: "sickness" }) : after;
-      break;
-    }
-    case "sickness": {
-      after = resolveSicknessPhase(state);
       after = after.stage === "battle" ? maybeFinishDraw({ ...after, phase: "summon" }) : after;
       break;
     }
     case "summon": {
       after = resolveSummonPhase(state);
       after =
-        after.stage === "battle"
+        after.stage === "battle" && !hasUnrevealedSummon(after)
           ? maybeFinishDraw({ ...after, turn: after.turn + 1, phase: "whiteMove" })
           : after;
       break;
@@ -268,7 +298,11 @@ export function resolveFullTurn(state: GameState): GameState {
   let next = state;
 
   do {
+    const before = next;
     next = advancePhase(next);
+    if (next.stage === before.stage && next.turn === before.turn && next.phase === before.phase) {
+      break;
+    }
   } while (next.stage === "battle" && next.turn === initialTurn);
 
   return next;
@@ -295,14 +329,47 @@ export function continueAfterRound(state: GameState): GameState {
     stage: "pick",
     pick: {
       kind,
-      choices: {},
+      commitments: {},
+      reveals: {},
     },
     eventLog: [`${getPickTitle(kind)} is open.`],
   };
 }
 
-export function choosePick(state: GameState, color: PlayerColor, effect: EffectId): GameState {
+export function commitPick(state: GameState, color: PlayerColor, hash: string): GameState {
   if (state.stage !== "pick" || !state.pick) {
+    return state;
+  }
+
+  if (state.pick.reveals[color]) {
+    return state;
+  }
+
+  return {
+    ...state,
+    pick: {
+      ...state.pick,
+      commitments: {
+        ...state.pick.commitments,
+        [color]: hash,
+      },
+    },
+    eventLog: [`${capitalize(color)} sealed a pick.`],
+  };
+}
+
+export function revealPick(state: GameState, color: PlayerColor, effect: EffectId, nonce: string): GameState {
+  if (state.stage !== "pick" || !state.pick) {
+    return state;
+  }
+
+  const commitment = state.pick.commitments[color];
+
+  if (!commitment || state.pick.reveals[color]) {
+    return state;
+  }
+
+  if (!state.pick.commitments.white || !state.pick.commitments.black) {
     return state;
   }
 
@@ -312,6 +379,21 @@ export function choosePick(state: GameState, color: PlayerColor, effect: EffectI
     return state;
   }
 
+  const expectedHash = createPickCommitment({
+    color,
+    round: state.round,
+    kind: state.pick.kind,
+    effect,
+    nonce,
+  });
+
+  if (commitment !== expectedHash) {
+    return {
+      ...state,
+      eventLog: [`${capitalize(color)} pick reveal did not match the sealed input.`],
+    };
+  }
+
   if (isEffectActive(state, effect)) {
     return {
       ...state,
@@ -319,15 +401,19 @@ export function choosePick(state: GameState, color: PlayerColor, effect: EffectI
     };
   }
 
-  if (Object.values(state.pick.choices).includes(effect)) {
+  if (Object.values(state.pick.reveals).includes(effect)) {
     return {
       ...state,
-      eventLog: [`${EFFECT_COPY[effect].title} was already chosen in this pick.`],
+      pick: {
+        ...state.pick,
+        commitments: omitColor(state.pick.commitments, color),
+      },
+      eventLog: [`${EFFECT_COPY[effect].title} was already revealed in this pick. ${capitalize(color)} must choose again.`],
     };
   }
 
-  const choices = {
-    ...state.pick.choices,
+  const reveals = {
+    ...state.pick.reveals,
     [color]: effect,
   };
 
@@ -335,16 +421,16 @@ export function choosePick(state: GameState, color: PlayerColor, effect: EffectI
     ...state,
     pick: {
       ...state.pick,
-      choices,
+      reveals,
     },
-    eventLog: [`${capitalize(color)} chose ${EFFECT_COPY[effect].title}.`],
+    eventLog: [`${capitalize(color)} revealed ${EFFECT_COPY[effect].title}.`],
   };
 
-  if (!choices.white || !choices.black) {
+  if (!reveals.white || !reveals.black) {
     return withChoice;
   }
 
-  const pickedEffects = [choices.white, choices.black];
+  const pickedEffects = [reveals.white, reveals.black];
   const activeBuffs = [...state.activeBuffs];
   const activeTransforms = [...state.activeTransforms];
 
@@ -370,7 +456,7 @@ export function choosePick(state: GameState, color: PlayerColor, effect: EffectI
     pick: undefined,
     roundWinner: undefined,
     eventLog: [
-      `${EFFECT_COPY[choices.white].title} and ${EFFECT_COPY[choices.black].title} are now global effects.`,
+      `${EFFECT_COPY[reveals.white].title} and ${EFFECT_COPY[reveals.black].title} are now global effects.`,
       `Round ${state.round + 1} is ready.`,
     ],
   };
@@ -411,7 +497,6 @@ export function createPiece(
     maxHp: stats.maxHp,
     baseDamage: stats.damage,
     position,
-    sickness: 0,
     moves: 0,
     enteredAt,
     alive: true,
@@ -463,7 +548,7 @@ function resolveMovePhase(state: GameState, color: PlayerColor): GameState {
   const combats: PendingCombat[] = [];
   const events: string[] = [];
   const movers = pieces
-    .filter((piece) => piece.alive && piece.owner === color && piece.type !== "king" && piece.sickness <= 0)
+    .filter((piece) => piece.alive && piece.owner === color && piece.type !== "king")
     .sort((a, b) => {
       if (b.moves !== a.moves) {
         return b.moves - a.moves;
@@ -475,7 +560,7 @@ function resolveMovePhase(state: GameState, color: PlayerColor): GameState {
   for (const initialPiece of movers) {
     const current = pieces.find((piece) => piece.id === initialPiece.id);
 
-    if (!current || !current.alive || current.sickness > 0) {
+    if (!current || !current.alive) {
       continue;
     }
 
@@ -714,28 +799,16 @@ function resolveCollisionPhase(state: GameState): GameState {
   return withDamage;
 }
 
-function resolveSicknessPhase(state: GameState): GameState {
-  const pieces = state.pieces.map((piece) => {
-    if (!piece.alive || piece.type === "king" || piece.sickness <= 0) {
-      return piece;
-    }
-
-    return {
-      ...piece,
-      sickness: piece.sickness - 1,
-    };
-  });
-
-  const reduced = state.pieces.filter((piece) => piece.alive && piece.type !== "king" && piece.sickness > 0).length;
-
-  return {
-    ...state,
-    pieces,
-    eventLog: [reduced > 0 ? `${reduced} summoned unit(s) recover from sickness.` : "No sickness counters to reduce."],
-  };
-}
-
 function resolveSummonPhase(state: GameState): GameState {
+  const unrevealed = getUnrevealedSummonColors(state);
+
+  if (unrevealed.length > 0) {
+    return {
+      ...state,
+      eventLog: [`Waiting for sealed summon reveal: ${unrevealed.map(capitalize).join(", ")}.`],
+    };
+  }
+
   let pieces = state.pieces;
   let nextPieceId = state.nextPieceId;
   let nextEntryOrder = state.nextEntryOrder;
@@ -743,7 +816,7 @@ function resolveSummonPhase(state: GameState): GameState {
   const events: string[] = [];
 
   for (const color of ["white", "black"] as PlayerColor[]) {
-    const pending = players[color].pendingSummon;
+    const pending = players[color].pendingSummon?.reveal;
 
     if (!pending) {
       events.push(`${capitalize(color)} has no committed summon.`);
@@ -766,10 +839,7 @@ function resolveSummonPhase(state: GameState): GameState {
       continue;
     }
 
-    const piece = {
-      ...createPiece(pending.pieceType, color, pending.slot, nextPieceId, nextEntryOrder),
-      sickness: 1,
-    };
+    const piece = createPiece(pending.pieceType, color, pending.slot, nextPieceId, nextEntryOrder);
 
     pieces = [...pieces, piece];
     nextPieceId += 1;
@@ -796,6 +866,17 @@ function resolveSummonPhase(state: GameState): GameState {
     nextEntryOrder,
     eventLog: events,
   };
+}
+
+function hasUnrevealedSummon(state: GameState): boolean {
+  return getUnrevealedSummonColors(state).length > 0;
+}
+
+function getUnrevealedSummonColors(state: GameState): PlayerColor[] {
+  return (["white", "black"] as PlayerColor[]).filter((color) => {
+    const pending = state.players[color].pendingSummon;
+    return pending && !pending.reveal;
+  });
 }
 
 function getPrimaryTargets(
@@ -965,6 +1046,12 @@ function updatePlayer(state: GameState, color: PlayerColor, update: (player: Pla
       [color]: update(state.players[color]),
     },
   };
+}
+
+function omitColor<T>(values: Partial<Record<PlayerColor, T>>, color: PlayerColor): Partial<Record<PlayerColor, T>> {
+  const next = { ...values };
+  delete next[color];
+  return next;
 }
 
 function getSummonSlot(color: PlayerColor, special: boolean): 1 | 2 | 7 | 8 {

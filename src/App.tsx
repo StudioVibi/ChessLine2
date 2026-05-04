@@ -3,6 +3,7 @@ import {
   Check,
   ChevronsRight,
   Copy,
+  Lock,
   Minus,
   Play,
   Plus,
@@ -37,18 +38,42 @@ import {
   createOnlineGame,
   createRoomId,
   makeAdvancePhasePost,
-  makeChoosePickPost,
+  makeCommitPickPost,
   makeClearSummonPost,
   makeCommitSummonPost,
+  makeRevealPickPost,
+  makeRevealSummonPost,
   makeResolveFullTurnPost,
   makeSetDraftCountPost,
 } from "./game/online";
+import { createInputNonce, createPickCommitment, createSummonCommitment } from "./game/secrets";
 import type { OnlinePost } from "./game/online";
-import type { BuffId, CommonPieceType, EffectId, GameState, PieceCounts, PieceState, PlayerColor } from "./game/types";
+import type { BuffId, CommonPieceType, EffectId, GameState, PickKind, PieceCounts, PieceState, PlayerColor } from "./game/types";
 
 const presets: Record<string, PieceCounts> = {
   Line: { pawn: 8, knight: 2, bishop: 2, rook: 0, queen: 0 },
   Power: { pawn: 0, knight: 0, bishop: 2, rook: 1, queen: 1 },
+};
+
+type LocalSummonSecret = {
+  input: "summon";
+  hash: string;
+  color: PlayerColor;
+  round: number;
+  turn: number;
+  pieceType: CommonPieceType;
+  special: boolean;
+  nonce: string;
+};
+
+type LocalPickSecret = {
+  input: "pick";
+  hash: string;
+  color: PlayerColor;
+  round: number;
+  pickKind: PickKind;
+  effect: EffectId;
+  nonce: string;
 };
 
 function useOnlineGame(room: string): {
@@ -128,6 +153,7 @@ function useOnlineGame(room: string): {
 export function App() {
   const [room] = useState(() => ensureRoomInUrl());
   const [localColor, setLocalColor] = useState<PlayerColor>(() => getStoredColor());
+  const revealPostsRef = useRef<Set<string>>(new Set());
   const online = useOnlineGame(room);
   const game = online.state;
   const onlineReady = online.synced;
@@ -153,6 +179,106 @@ export function App() {
   const copyRoomLink = () => {
     void navigator.clipboard?.writeText(getRoomUrl(room));
   };
+
+  const commitHiddenSummon = (color: PlayerColor, pieceType: CommonPieceType, special: boolean) => {
+    const nonce = createInputNonce();
+    const hash = createSummonCommitment({
+      color,
+      round: game.round,
+      turn: game.turn,
+      pieceType,
+      special,
+      nonce,
+    });
+
+    saveLocalSecret(room, hash, {
+      input: "summon",
+      hash,
+      color,
+      round: game.round,
+      turn: game.turn,
+      pieceType,
+      special,
+      nonce,
+    });
+    post(makeCommitSummonPost(color, hash));
+  };
+
+  const commitHiddenPick = (color: PlayerColor, effect: EffectId) => {
+    if (!game.pick) {
+      return;
+    }
+
+    const nonce = createInputNonce();
+    const hash = createPickCommitment({
+      color,
+      round: game.round,
+      kind: game.pick.kind,
+      effect,
+      nonce,
+    });
+
+    saveLocalSecret(room, hash, {
+      input: "pick",
+      hash,
+      color,
+      round: game.round,
+      pickKind: game.pick.kind,
+      effect,
+      nonce,
+    });
+    post(makeCommitPickPost(color, hash));
+  };
+
+  useEffect(() => {
+    revealPostsRef.current.clear();
+  }, [room]);
+
+  useEffect(() => {
+    if (!onlineReady) {
+      return;
+    }
+
+    if (game.stage === "battle" && game.phase === "summon") {
+      const pending = game.players[localColor].pendingSummon;
+      if (pending && !pending.reveal) {
+        const secret = readLocalSecret<LocalSummonSecret>(room, pending.hash);
+        const revealKey = `summon:${pending.hash}`;
+
+        if (
+          secret?.input === "summon" &&
+          secret.color === localColor &&
+          secret.round === game.round &&
+          secret.turn === game.turn &&
+          !revealPostsRef.current.has(revealKey)
+        ) {
+          revealPostsRef.current.add(revealKey);
+          post(makeRevealSummonPost(localColor, secret.pieceType, secret.special, secret.nonce));
+        }
+      }
+    }
+
+    if (game.stage === "pick" && game.pick) {
+      const commitment = game.pick.commitments[localColor];
+      const bothCommitted = Boolean(game.pick.commitments.white && game.pick.commitments.black);
+
+      if (commitment && bothCommitted && !game.pick.reveals[localColor]) {
+        const secret = readLocalSecret<LocalPickSecret>(room, commitment);
+        const revealKey = `pick:${commitment}`;
+
+        if (
+          secret?.input === "pick" &&
+          secret.color === localColor &&
+          secret.round === game.round &&
+          secret.pickKind === game.pick.kind &&
+          !revealPostsRef.current.has(revealKey)
+        ) {
+          revealPostsRef.current.add(revealKey);
+          post(makeRevealPickPost(localColor, secret.effect, secret.nonce));
+        }
+      }
+    }
+  }, [game, localColor, onlineReady, room]);
 
   return (
     <main className="app-shell">
@@ -206,9 +332,10 @@ export function App() {
       {game.stage === "battle" && (
         <BattleScreen
           game={game}
+          room={room}
           localColor={localColor}
           onlineReady={onlineReady}
-          onCommit={(color, pieceType, special) => post(makeCommitSummonPost(color, pieceType, special))}
+          onCommit={commitHiddenSummon}
           onClear={(color) => post(makeClearSummonPost(color))}
           onStep={() => post(makeAdvancePhasePost(game))}
           onTurn={() => post(makeResolveFullTurnPost(game))}
@@ -226,9 +353,10 @@ export function App() {
       {game.stage === "pick" && (
         <PickScreen
           game={game}
+          room={room}
           localColor={localColor}
           onlineReady={onlineReady}
-          onPick={(color, effect) => post(makeChoosePickPost(color, effect))}
+          onPick={commitHiddenPick}
         />
       )}
 
@@ -377,6 +505,7 @@ function RoundIntro({ game, onlineReady, onBegin }: { game: GameState; onlineRea
 
 function BattleScreen({
   game,
+  room,
   localColor,
   onlineReady,
   onCommit,
@@ -385,6 +514,7 @@ function BattleScreen({
   onTurn,
 }: {
   game: GameState;
+  room: string;
   localColor: PlayerColor;
   onlineReady: boolean;
   onCommit: (color: PlayerColor, pieceType: CommonPieceType, special: boolean) => void;
@@ -411,6 +541,8 @@ function BattleScreen({
         <SummonPanel
           color="white"
           game={game}
+          room={room}
+          localColor={localColor}
           disabled={!onlineReady || localColor !== "white"}
           onCommit={onCommit}
           onClear={onClear}
@@ -418,6 +550,8 @@ function BattleScreen({
         <SummonPanel
           color="black"
           game={game}
+          room={room}
+          localColor={localColor}
           disabled={!onlineReady || localColor !== "black"}
           onCommit={onCommit}
           onClear={onClear}
@@ -500,7 +634,6 @@ function PieceView({ piece, game }: { piece: PieceState; game: GameState }) {
           ))}
         </div>
       )}
-      {piece.sickness > 0 && <span className="sickness">S</span>}
       <div className="piece-stats">
         <span>{piece.hp} HP</span>
         <span>{getDisplayedDamage(game, piece)} ATK</span>
@@ -512,17 +645,28 @@ function PieceView({ piece, game }: { piece: PieceState; game: GameState }) {
 function SummonPanel({
   color,
   game,
+  room,
+  localColor,
   disabled,
   onCommit,
   onClear,
 }: {
   color: PlayerColor;
   game: GameState;
+  room: string;
+  localColor: PlayerColor;
   disabled: boolean;
   onCommit: (color: PlayerColor, pieceType: CommonPieceType, special: boolean) => void;
   onClear: (color: PlayerColor) => void;
 }) {
   const player = game.players[color];
+  const isLocal = color === localColor;
+  const localSecret = player.pendingSummon ? readLocalSecret<LocalSummonSecret>(room, player.pendingSummon.hash) : undefined;
+  const revealed = player.pendingSummon?.reveal;
+  const localPending =
+    isLocal && localSecret?.input === "summon"
+      ? `${PIECE_STATS[localSecret.pieceType].label} to ${localSecret.special ? "special" : "normal"} slot`
+      : undefined;
 
   return (
     <section className={`panel summon-panel ${color} ${disabled ? "readonly" : ""}`}>
@@ -538,8 +682,11 @@ function SummonPanel({
       <div className="pending-line">
         {player.pendingSummon ? (
           <>
-            <Sparkles size={15} />
-            {PIECE_STATS[player.pendingSummon.pieceType].label} to slot {player.pendingSummon.slot}
+            <Lock size={15} />
+            {localPending ??
+              (revealed && isLocal
+                ? `${PIECE_STATS[revealed.pieceType].label} to slot ${revealed.slot}`
+                : "Sealed summon committed")}
           </>
         ) : (
           "No summon committed"
@@ -572,11 +719,13 @@ function SummonPanel({
 
 function PickScreen({
   game,
+  room,
   localColor,
   onlineReady,
   onPick,
 }: {
   game: GameState;
+  room: string;
   localColor: PlayerColor;
   onlineReady: boolean;
   onPick: (color: PlayerColor, effect: EffectId) => void;
@@ -588,24 +737,39 @@ function PickScreen({
   }
 
   const options = PICK_OPTIONS[pick.kind];
-  const pickedEffects = Object.values(pick.choices);
+  const localCommitment = pick.commitments[localColor];
+  const localSecret = localCommitment ? readLocalSecret<LocalPickSecret>(room, localCommitment) : undefined;
+  const whiteCommitted = Boolean(pick.commitments.white || pick.reveals.white);
+  const blackCommitted = Boolean(pick.commitments.black || pick.reveals.black);
 
   return (
     <section className="pick-screen">
       <ScoreBar game={game} />
       <h2>{pick.kind === "buff" ? "Pick 1: Buff" : pick.kind === "transform2" ? "Pick 2: Transform" : "Pick 3: Transform"}</h2>
+      <div className="sealed-status-row">
+        <span className={whiteCommitted ? "sealed-status committed" : "sealed-status"}>White {whiteCommitted ? "sealed" : "waiting"}</span>
+        <span className={blackCommitted ? "sealed-status committed" : "sealed-status"}>Black {blackCommitted ? "sealed" : "waiting"}</span>
+      </div>
       <div className={`pick-grid count-${options.length}`}>
         {options.map((effect) => {
-          const chosenBy = getChosenBy(pick.choices, effect);
-          const disabledForWhite = !onlineReady || localColor !== "white" || Boolean(pick.choices.white || chosenBy);
-          const disabledForBlack = !onlineReady || localColor !== "black" || Boolean(pick.choices.black || chosenBy);
+          const revealedBy = getChosenBy(pick.reveals, effect);
+          const locallySealed = localSecret?.input === "pick" && localSecret.effect === effect && !pick.reveals[localColor];
+          const disabledForWhite =
+            !onlineReady ||
+            localColor !== "white" ||
+            Boolean(pick.commitments.white || pick.reveals.white || revealedBy);
+          const disabledForBlack =
+            !onlineReady ||
+            localColor !== "black" ||
+            Boolean(pick.commitments.black || pick.reveals.black || revealedBy);
 
           return (
-            <article className={chosenBy ? "pick-card chosen" : "pick-card"} key={effect}>
+            <article className={revealedBy || locallySealed ? "pick-card chosen" : "pick-card"} key={effect}>
               <EffectArt effect={effect} />
               <h3>{EFFECT_COPY[effect].title}</h3>
               <p>{EFFECT_COPY[effect].detail}</p>
-              {chosenBy && <span className="chosen-pill">{capitalize(chosenBy)} picked</span>}
+              {locallySealed && <span className="chosen-pill">Your sealed pick</span>}
+              {revealedBy && <span className="chosen-pill">{capitalize(revealedBy)} revealed</span>}
               <div className="pick-actions">
                 <button disabled={disabledForWhite} onClick={() => onPick("white", effect)}>
                   <Check size={15} />
@@ -757,6 +921,28 @@ function getRoomUrl(room: string): string {
   const url = new URL(window.location.href);
   url.searchParams.set("room", room);
   return url.toString();
+}
+
+function saveLocalSecret<T extends { hash: string }>(room: string, hash: string, secret: T): void {
+  window.localStorage.setItem(getSecretStorageKey(room, hash), JSON.stringify(secret));
+}
+
+function readLocalSecret<T>(room: string, hash: string): T | undefined {
+  const raw = window.localStorage.getItem(getSecretStorageKey(room, hash));
+
+  if (!raw) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function getSecretStorageKey(room: string, hash: string): string {
+  return `chess-line-2-secret:${room}:${hash}`;
 }
 
 function sanitizeRoom(value: string | null): string | undefined {

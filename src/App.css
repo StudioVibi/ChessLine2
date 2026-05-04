@@ -529,21 +529,6 @@ button:disabled {
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
-.sickness {
-  position: absolute;
-  left: 5px;
-  top: 5px;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
-  color: #251600;
-  background: #e0c27d;
-  font-size: 0.76rem;
-  font-weight: 900;
-}
-
 .piece-stats {
   width: 100%;
   display: grid;
@@ -588,6 +573,28 @@ button:disabled {
   display: grid;
   justify-content: center;
   gap: 16px;
+}
+
+.sealed-status-row {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sealed-status {
+  border: 1px solid #3d493f;
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: #9fa99a;
+  background: #111611;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.sealed-status.committed {
+  border-color: #c99742;
+  color: #f6e2ac;
 }
 
 .pick-grid.count-3 {

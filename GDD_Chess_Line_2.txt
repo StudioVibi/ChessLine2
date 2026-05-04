@@ -10,7 +10,7 @@ Base herdada: Chess Line 1 / Chess Line Hotseat
 Escopo: regras de jogo, fluxo de rodadas, draft, progressão, picks, estados, UI/UX, assets e comportamento esperado em SPEC mode.
 Fora do escopo: menu principal, criação de sala, Vibi-network, AWS, matchmaking, backend e detalhes de infraestrutura.
 
-Chess Line 2 é uma evolução do Chess Line 1. O CL1 definiu a esteira de combate: tabuleiro linear, reis fixos, avanço automático, colisão, dano simultâneo, invocação, enjoo e resolução determinística por fases. O CL2 mantém essa base e adiciona uma camada acima do combate: Draft inicial, Rounds, Picks globais, progressão entre rounds, pontuação e relatório final.
+Chess Line 2 é uma evolução do Chess Line 1. O CL1 definiu a esteira de combate: tabuleiro linear, reis fixos, avanço automático, colisão, dano simultâneo, invocação e resolução determinística por fases. O CL2 mantém essa base, remove a mecânica de enjoo de invocação e adiciona uma camada acima do combate: Draft inicial, Rounds, Picks globais, progressão entre rounds, pontuação e relatório final.
 
 Regra de precedência: regras do CL2 sobrescrevem regras do CL1 quando houver conflito ou ambiguidade.
 
@@ -191,15 +191,13 @@ Dentro de cada Round, o CL2 herda a esteira de turno do CL1:
 2. White Collision / Damage Resolution
 3. Black Move Phase
 4. Black Collision / Damage Resolution
-5. Sickness Reduction Phase
-6. Summon Resolution Phase
+5. Summon Resolution Phase
 
 Resumo:
 White move primeiro.
 Resolve dano de colisões geradas pelo avanço White.
 Black move depois.
 Resolve dano de colisões geradas pelo avanço Black.
-Reduz enjoo das unidades vivas.
 Invocações comprometidas entram no fim do turno.
 
 Essa estrutura deve permanecer determinística.
@@ -215,7 +213,6 @@ Black: -1
 Uma peça só move se:
 - estiver viva
 - não for rei
-- não estiver em enjoo de invocação
 
 Reis não se movem.
 
@@ -300,6 +297,11 @@ O efeito pode ser apresentado visualmente como instakill, mas tecnicamente deve 
 
 Cada jogador pode commitar uma peça para invocação.
 
+O input de invocação é velado:
+- o estado compartilhado registra apenas um compromisso/commit opaco
+- peça e slot não são revelados ao oponente antes da Summon Resolution Phase
+- na Summon Resolution Phase, o jogador revela a peça e o slot para resolver a ação
+
 Slots possíveis:
 White normal: 1
 White special: 2
@@ -318,16 +320,16 @@ Regra importante:
 Peça commitada não é consumida se a invocação falhar.
 
 
-16. Enjoo de Invocação
+16. Invocação Sem Enjoo
 
-Unidades invocadas entram com 1 turno de enjoo.
+Unidades invocadas não entram com enjoo.
 
-Durante o enjoo, a unidade:
+A unidade invocada:
 - existe no tabuleiro
 - ocupa espaço
 - pode sofrer dano
 - pode ser alvo
-- não se move
+- pode se mover normalmente quando chegar a próxima phase de movimento da sua cor
 
 Exemplo:
 [][][][][][][][]
@@ -418,8 +420,10 @@ Regra:
 - Os dois jogadores escolhem dentro do mesmo Pick.
 - Não é possível escolher o mesmo Buff duas vezes.
 - Não é possível escolher a mesma Transform duas vezes.
+- O input exato do Pick é velado até os dois jogadores terem commitado.
 
-Se um jogador escolher uma opção, a mesma opção fica indisponível para o outro jogador naquele Pick.
+Se uma opção já revelada estiver escolhida naquele Pick, ela fica indisponível para o outro jogador.
+Se os dois jogadores commitarem a mesma opção enquanto ela ainda está velada, a primeira revelação válida permanece e a escolha duplicada é rejeitada; o outro jogador deve escolher novamente.
 As duas escolhas entram como efeitos globais permanentes.
 
 
@@ -698,6 +702,7 @@ Pick 2: 3 cartas centralizadas.
 Pick 3: 4 cartas centralizadas.
 
 Quando uma opção for escolhida por um jogador, ela deve ficar indisponível para o outro jogador naquele mesmo Pick.
+A UI pode mostrar que um jogador já selou/confirmou seu Pick, mas não deve revelar qual carta foi escolhida antes da revelação.
 
 27.4 UI de Buffs
 Buffs devem ser exibidos na parte superior da esteira.
@@ -801,7 +806,6 @@ Cada peça em campo deve carregar pelo menos:
 - vida máxima
 - dano base
 - posição atual
-- contador de enjoo
 - contador de movimentos realizados
 - ordem/tempo de entrada em campo
 - estado vivo/morto
@@ -897,7 +901,7 @@ A invocação deve funcionar normalmente. A validação real ocorre na Summon Re
 Slot livre no commit, mas ocupado na resolução:
 A invocação falha e a peça não é consumida.
 
-Peça com enjoo sendo atacada:
+Peça recém-invocada sendo atacada:
 A peça recebe dano normalmente.
 
 Peça morrendo em confronto:
@@ -959,14 +963,14 @@ O jogo está correto quando:
 5. O Draft define o estoque do jogador.
 6. O estoque do Draft é restaurado a cada Round.
 7. O core loop segue Draft -> Round -> Pick -> Round -> Pick -> Round -> Pick -> Final Round -> Relatório.
-8. Cada Round usa as phases herdadas do CL1.
+8. Cada Round usa as phases atuais: White Move, White Collision, Black Move, Black Collision e Summon Resolution.
 9. Dano em confronto é simultâneo.
 10. Peças mortas ainda causam dano no confronto em que morreram.
 11. Peças são removidas antes da próxima phase.
 12. Invocações entram apenas na Summon Resolution Phase.
 13. Invocações falham se o slot estiver ocupado na resolução.
 14. Invocações falhas não consomem peça.
-15. Unidades invocadas entram com 1 turno de enjoo.
+15. Unidades invocadas entram sem enjoo e podem agir quando chegar a próxima phase de movimento da sua cor.
 16. Prioridade por movimentos realizados evita engarrafamento próprio.
 17. Vitória de Round é contabilizada imediatamente quando um rei morre.
 18. Vitória de Round vale 1 ponto.
@@ -974,28 +978,29 @@ O jogo está correto quando:
 20. Derrota de Round vale 0 ponto.
 21. Placar é exibido acima da esteira, White à esquerda e Black à direita.
 22. Picks são simultâneos.
-23. Não é possível escolher o mesmo Buff duas vezes no mesmo Pick.
-24. Não é possível escolher a mesma Transform duas vezes no mesmo Pick.
-25. Buffs são globais, simétricos, permanentes e afetam peças futuras.
-26. Transforms são globais, simétricas, permanentes e afetam peças futuras do tipo correspondente.
-27. Multidão aplica +1 dano antes de multiplicadores.
-28. Crescimento cura 1 ao mover, sem sobrecura.
-29. Atropelamento afeta no máximo 1 alvo adicional.
-30. Bishop atinge sequência de unidades iguais até a sequência ser interrompida.
-31. Tower reduz dano recebido em 1.
-32. Queen avança até 5 slots respeitando aliado, confronto e alcance máximo.
-33. Knight pode ultrapassar Pawns conforme regra da Transform.
-34. Pawn causa 4x damage contra King quando a Transform estiver ativa.
-35. Tags acompanham, redimensionam e desaparecem junto com a peça.
-36. Buffs aparecem acima da esteira com versão colorida ou gray.
-37. UI de Picks centraliza cartas tanto com 3 quanto com 4 opções.
-38. Relatório final mostra resultado e time draftado do vencedor.
-39. Toda execução é reproduzível em SPEC mode.
+23. Inputs de invocação e Pick são velados até a fase de revelação/resolução.
+24. Não é possível aplicar o mesmo Buff duas vezes no mesmo Pick.
+25. Não é possível aplicar a mesma Transform duas vezes no mesmo Pick.
+26. Buffs são globais, simétricos, permanentes e afetam peças futuras.
+27. Transforms são globais, simétricas, permanentes e afetam peças futuras do tipo correspondente.
+28. Multidão aplica +1 dano antes de multiplicadores.
+29. Crescimento cura 1 ao mover, sem sobrecura.
+30. Atropelamento afeta no máximo 1 alvo adicional.
+31. Bishop atinge sequência de unidades iguais até a sequência ser interrompida.
+32. Tower reduz dano recebido em 1.
+33. Queen avança até 5 slots respeitando aliado, confronto e alcance máximo.
+34. Knight pode ultrapassar Pawns conforme regra da Transform.
+35. Pawn causa 4x damage contra King quando a Transform estiver ativa.
+36. Tags acompanham, redimensionam e desaparecem junto com a peça.
+37. Buffs aparecem acima da esteira com versão colorida ou gray.
+38. UI de Picks centraliza cartas tanto com 3 quanto com 4 opções.
+39. Relatório final mostra resultado e time draftado do vencedor.
+40. Toda execução é reproduzível em SPEC mode.
 
 
 35. Resumo Executivo para Implementação
 
-Chess Line 2 é um jogo 1v1 determinístico em esteira linear de 10 slots, herdando movimento, colisão, dano simultâneo, invocação e enjoo do Chess Line 1. O CL2 adiciona Draft, Rounds, Picks globais, pontuação e progressão entre rounds.
+Chess Line 2 é um jogo 1v1 determinístico em esteira linear de 10 slots, herdando movimento, colisão, dano simultâneo e invocação do Chess Line 1. O CL2 remove enjoo de invocação e adiciona Draft, Rounds, Picks globais, pontuação e progressão entre rounds.
 
 Cada jogador começa com um King automático e monta um estoque por Draft até peso 20. O peso de cada peça comum é igual à vida inicial: Pawn 1, Bishop 3, Knight 3, Tower 5, Queen 9. King pesa 0 e não é draftável.
 
@@ -1011,7 +1016,7 @@ Derrota = 0
 
 O maior montante define o vencedor final, mas pode haver empate.
 
-Picks são simultâneos. Dois jogadores não podem escolher a mesma opção no mesmo Pick. As escolhas de ambos entram como efeitos globais, simétricos, permanentes e aplicáveis a peças atuais e futuras.
+Picks são simultâneos e velados por commit/reveal. Dois jogadores não podem aplicar a mesma opção no mesmo Pick; se houver duplicata após revelação, a primeira revelação válida permanece e o outro jogador escolhe novamente. As escolhas válidas de ambos entram como efeitos globais, simétricos, permanentes e aplicáveis a peças atuais e futuras.
 
 Buffs:
 Multidão = todas as peças ganham +1 dano.

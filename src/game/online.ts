@@ -2,11 +2,13 @@ import { VibiNet } from "vibinet";
 import {
   advancePhase,
   beginRound,
-  choosePick,
   clearSummon,
+  commitPick,
   commitSummon,
   continueAfterRound,
   createInitialGameState,
+  revealPick,
+  revealSummon,
   resetGame,
   resolveFullTurn,
   setDraftCount,
@@ -16,7 +18,7 @@ import type { BattlePhase, CommonPieceType, EffectId, GameState, PlayerColor } f
 
 export const ONLINE_TICK_RATE = 12;
 export const ONLINE_TOLERANCE_MS = 300;
-export const VIBINET_SERVER_URL = "wss://net.vibistudiotest.site";
+export const VIBINET_SERVER_URL = "https://net.vibistudiotest.site";
 
 const COLORS: PlayerColor[] = ["white", "black"];
 const PIECES: CommonPieceType[] = ["pawn", "knight", "bishop", "rook", "queen"];
@@ -32,12 +34,12 @@ const EFFECTS: EffectId[] = [
   "knightHopPawns",
   "pawnKingSlayer",
 ];
-const PHASES: BattlePhase[] = ["whiteMove", "whiteCollision", "blackMove", "blackCollision", "sickness", "summon"];
+const PHASES: BattlePhase[] = ["whiteMove", "whiteCollision", "blackMove", "blackCollision", "summon"];
 
 type ColorCode = 0 | 1;
 type PieceCode = 0 | 1 | 2 | 3 | 4;
 type EffectCode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
-type PhaseCode = 0 | 1 | 2 | 3 | 4 | 5;
+type PhaseCode = 0 | 1 | 2 | 3 | 4;
 type Bit = 0 | 1;
 
 export type OnlinePost =
@@ -45,12 +47,14 @@ export type OnlinePost =
   | { $: "setDraftCount"; color: ColorCode; piece: PieceCode; count: number }
   | { $: "startGame" }
   | { $: "beginRound"; round: number }
-  | { $: "commitSummon"; color: ColorCode; piece: PieceCode; special: Bit }
+  | { $: "commitSummon"; color: ColorCode; hash: string }
+  | { $: "revealSummon"; color: ColorCode; piece: PieceCode; special: Bit; nonce: string }
   | { $: "clearSummon"; color: ColorCode }
   | { $: "advancePhase"; round: number; turn: number; phase: PhaseCode }
   | { $: "resolveFullTurn"; round: number; turn: number; phase: PhaseCode }
   | { $: "continueAfterRound"; round: number }
-  | { $: "choosePick"; color: ColorCode; effect: EffectCode };
+  | { $: "commitPick"; color: ColorCode; hash: string }
+  | { $: "revealPick"; color: ColorCode; effect: EffectCode; nonce: string };
 
 const emptyStruct: VibiNet.Packed = { $: "Struct", fields: {} };
 const colorPacker: VibiNet.Packed = { $: "UInt", size: 1 };
@@ -59,6 +63,7 @@ const effectPacker: VibiNet.Packed = { $: "UInt", size: 4 };
 const phasePacker: VibiNet.Packed = { $: "UInt", size: 3 };
 const roundPacker: VibiNet.Packed = { $: "UInt", size: 3 };
 const turnPacker: VibiNet.Packed = { $: "UInt", size: 16 };
+const stringPacker: VibiNet.Packed = { $: "String" };
 
 export const onlinePostPacker: VibiNet.Packed = {
   $: "Union",
@@ -83,8 +88,16 @@ export const onlinePostPacker: VibiNet.Packed = {
       $: "Struct",
       fields: {
         color: colorPacker,
+        hash: stringPacker,
+      },
+    },
+    revealSummon: {
+      $: "Struct",
+      fields: {
+        color: colorPacker,
         piece: piecePacker,
         special: { $: "UInt", size: 1 },
+        nonce: stringPacker,
       },
     },
     clearSummon: {
@@ -115,11 +128,19 @@ export const onlinePostPacker: VibiNet.Packed = {
         round: roundPacker,
       },
     },
-    choosePick: {
+    commitPick: {
+      $: "Struct",
+      fields: {
+        color: colorPacker,
+        hash: stringPacker,
+      },
+    },
+    revealPick: {
       $: "Struct",
       fields: {
         color: colorPacker,
         effect: effectPacker,
+        nonce: stringPacker,
       },
     },
   },
@@ -149,9 +170,15 @@ export function applyOnlinePost(post: OnlinePost, state: GameState): GameState {
 
     case "commitSummon": {
       const color = decode(COLORS, post.color);
+
+      return color ? commitSummon(state, color, post.hash) : state;
+    }
+
+    case "revealSummon": {
+      const color = decode(COLORS, post.color);
       const piece = decode(PIECES, post.piece);
 
-      return color && piece ? commitSummon(state, color, piece, post.special === 1) : state;
+      return color && piece ? revealSummon(state, color, piece, post.special === 1, post.nonce) : state;
     }
 
     case "clearSummon": {
@@ -169,11 +196,17 @@ export function applyOnlinePost(post: OnlinePost, state: GameState): GameState {
     case "continueAfterRound":
       return state.round === post.round ? continueAfterRound(state) : state;
 
-    case "choosePick": {
+    case "commitPick": {
+      const color = decode(COLORS, post.color);
+
+      return color ? commitPick(state, color, post.hash) : state;
+    }
+
+    case "revealPick": {
       const color = decode(COLORS, post.color);
       const effect = decode(EFFECTS, post.effect);
 
-      return color && effect ? choosePick(state, color, effect) : state;
+      return color && effect ? revealPick(state, color, effect, post.nonce) : state;
     }
   }
 }
@@ -187,12 +220,26 @@ export function makeSetDraftCountPost(color: PlayerColor, pieceType: CommonPiece
   };
 }
 
-export function makeCommitSummonPost(color: PlayerColor, pieceType: CommonPieceType, special: boolean): OnlinePost {
+export function makeCommitSummonPost(color: PlayerColor, hash: string): OnlinePost {
   return {
     $: "commitSummon",
     color: encodeColor(color),
+    hash,
+  };
+}
+
+export function makeRevealSummonPost(
+  color: PlayerColor,
+  pieceType: CommonPieceType,
+  special: boolean,
+  nonce: string,
+): OnlinePost {
+  return {
+    $: "revealSummon",
+    color: encodeColor(color),
     piece: encodePiece(pieceType),
     special: special ? 1 : 0,
+    nonce,
   };
 }
 
@@ -218,8 +265,12 @@ export function makeResolveFullTurnPost(state: GameState): OnlinePost {
   };
 }
 
-export function makeChoosePickPost(color: PlayerColor, effect: EffectId): OnlinePost {
-  return { $: "choosePick", color: encodeColor(color), effect: encodeEffect(effect) };
+export function makeCommitPickPost(color: PlayerColor, hash: string): OnlinePost {
+  return { $: "commitPick", color: encodeColor(color), hash };
+}
+
+export function makeRevealPickPost(color: PlayerColor, effect: EffectId, nonce: string): OnlinePost {
+  return { $: "revealPick", color: encodeColor(color), effect: encodeEffect(effect), nonce };
 }
 
 function matchesBattleMoment(state: GameState, round: number, turn: number, phase: PhaseCode): boolean {

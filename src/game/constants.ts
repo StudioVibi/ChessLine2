@@ -63,7 +63,6 @@ export const PHASE_LABELS: Record<BattlePhase, string> = {
   whiteCollision: "White Collision",
   blackMove: "Black Move",
   blackCollision: "Black Collision",
-  sickness: "Sickness Reduction",
   summon: "Summon Resolution",
 };
 

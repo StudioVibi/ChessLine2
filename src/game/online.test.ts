@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_COUNTS } from "./constants";
 import { createInitialGameState, createPiece } from "./engine";
-import { applyOnlinePost, makeAdvancePhasePost, makeSetDraftCountPost } from "./online";
+import { applyOnlinePost, makeAdvancePhasePost, makeCommitSummonPost, makeRevealSummonPost, makeSetDraftCountPost } from "./online";
+import { createSummonCommitment } from "./secrets";
 import type { GameState, PieceState } from "./types";
 
 function battleState(pieces: PieceState[], patch: Partial<GameState> = {}): GameState {
@@ -45,5 +46,31 @@ describe("online post adapter", () => {
 
     state = applyOnlinePost(post, state);
     expect(state.phase).toBe("whiteCollision");
+  });
+
+  it("maps sealed summon commit and reveal posts without exposing the input early", () => {
+    const nonce = "sealed-online";
+    const hash = createSummonCommitment({
+      color: "white",
+      round: 1,
+      turn: 1,
+      pieceType: "pawn",
+      special: false,
+      nonce,
+    });
+    let state = battleState([createPiece("king", "white", 0, 1, 1), createPiece("king", "black", 9, 2, 2)], {
+      phase: "summon",
+      players: {
+        white: { ...createInitialGameState().players.white, stock: { ...EMPTY_COUNTS, pawn: 1 } },
+        black: { ...createInitialGameState().players.black, stock: { ...EMPTY_COUNTS } },
+      },
+    });
+
+    state = applyOnlinePost(makeCommitSummonPost("white", hash), state);
+    expect(state.players.white.pendingSummon).toEqual({ hash });
+
+    state = applyOnlinePost(makeRevealSummonPost("white", "pawn", false, nonce), state);
+    expect(state.players.white.pendingSummon?.reveal?.pieceType).toBe("pawn");
+    expect(state.players.white.pendingSummon?.reveal?.slot).toBe(1);
   });
 });
