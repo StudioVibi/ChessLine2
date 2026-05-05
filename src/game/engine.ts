@@ -223,7 +223,7 @@ export function revealSummon(
     };
   }
 
-  return updatePlayer(state, color, (player) => ({
+  const withReveal = updatePlayer(state, color, (player) => ({
     ...player,
     pendingSummon: {
       ...pending,
@@ -234,6 +234,12 @@ export function revealSummon(
       },
     },
   }));
+
+  if (hasUnrevealedSummon(withReveal)) {
+    return withReveal;
+  }
+
+  return advancePhase(withReveal);
 }
 
 export function clearSummon(state: GameState, color: PlayerColor): GameState {

@@ -70,7 +70,9 @@ describe("online post adapter", () => {
     expect(state.players.white.pendingSummon).toEqual({ hash });
 
     state = applyOnlinePost(makeRevealSummonPost("white", "pawn", false, nonce), state);
-    expect(state.players.white.pendingSummon?.reveal?.pieceType).toBe("pawn");
-    expect(state.players.white.pendingSummon?.reveal?.slot).toBe(1);
+    expect(state.players.white.pendingSummon).toBeUndefined();
+    expect(state.phase).toBe("whiteMove");
+    expect(state.turn).toBe(2);
+    expect(state.pieces.find((piece) => piece.owner === "white" && piece.type === "pawn")?.position).toBe(1);
   });
 });
